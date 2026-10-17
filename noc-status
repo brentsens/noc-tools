@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# noc-status - read-only overview of the current NOC automation state
+# Usage: noc-status [--yesterday | --date YYYY-MM-DD]
+set -uo pipefail
+
+NOC_ROOT="$HOME/noc"
+TIX_ROOT="$NOC_ROOT/tickets"
+TIX_OPEN_DIR="$TIX_ROOT/open"
+CUTOFF_HOUR=6
+DAY=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --yesterday) DAY=$(date -d yesterday +%F) ;;
+    --date)
+      [ $# -ge 2 ] || { echo "ERROR: --date requires YYYY-MM-DD" >&2; exit 1; }
+      DAY="$2"; shift ;;
+    -h|--help)
+      sed -n '2,3p' "$0"; exit 0 ;;
+    *) echo "ERROR: Unknown option: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+if [ -z "$DAY" ]; then
+  if [ "$(date +%-H)" -lt "$CUTOFF_HOUR" ]; then DAY=$(date -d yesterday +%F); else DAY=$(date +%F); fi
+fi
+date -d "$DAY" >/dev/null 2>&1 || { echo "ERROR: Invalid date: $DAY" >&2; exit 1; }
+
+SHIFT_DIR="$NOC_ROOT/$DAY"
+NOTES="$SHIFT_DIR/shift-notes.md"
+INV_DIR="$SHIFT_DIR/investigations"
+HANDOVER="$SHIFT_DIR/handover/handover-$DAY.md"
+US_DATE=$(date -d "$DAY" +%m/%d/%Y)
+
+ok(){ printf '  [OK]   %s\n' "$1"; }
+warn(){ printf '  [WARN] %s\n' "$1"; }
+info(){ printf '  %-12s %s\n' "$1" "$2"; }
+
+printf '\nNOC STATUS - %s\n' "$US_DATE"
+printf '%s\n' '============================================================'
+
+printf '\nShift\n'
+if [ -d "$SHIFT_DIR" ]; then ok "Shift directory: $SHIFT_DIR"; else warn "Shift directory not found: $SHIFT_DIR"; fi
+if [ -f "$NOTES" ]; then
+  ok "Shift notes available"
+  note_lines=$(grep -cv '^[[:space:]]*$' "$NOTES" 2>/dev/null || true)
+  info "Notes lines:" "$note_lines non-empty"
+else warn "Shift notes missing"; fi
+
+printf '\nOpen Tickets\n'
+if ! command -v jq >/dev/null 2>&1; then
+  warn "jq not found; ticket JSON cannot be inspected"
+elif [ ! -d "$TIX_OPEN_DIR" ]; then
+  warn "Ticket directory not found: $TIX_OPEN_DIR"
+else
+  shopt -s nullglob
+  tickets=("$TIX_OPEN_DIR"/*.json)
+  shopt -u nullglob
+  if [ ${#tickets[@]} -eq 0 ]; then
+    info "Tickets:" "None"
+  else
+    valid_count=0
+    for f in "${tickets[@]}"; do
+      if jq -e 'type=="object" and (.id|type=="string") and (.jira|type=="object") and (.noc|type=="object")' "$f" >/dev/null 2>&1; then
+        valid_count=$((valid_count+1))
+        id=$(jq -r '.id' "$f")
+        env=$(jq -r '.noc.environment // ""' "$f")
+        status=$(jq -r '.jira.status // ""' "$f")
+        source=$(jq -r '.metadata.source // ""' "$f")
+        next=$(jq -r '.noc.next_action // ""' "$f")
+        printf '  %-10s %-18s %-16s %-18s %s\n' "$id" "${status:-[no status]}" "${env:-[no env]}" "${source:-[no source]}" "${next:-[no next action]}"
+      else
+        warn "Invalid ticket JSON: $f"
+      fi
+    done
+    info "Valid open:" "$valid_count"
+
+    printf '\nNeeds Review\n'
+    needs=0
+    for f in "${tickets[@]}"; do
+      jq -e . "$f" >/dev/null 2>&1 || continue
+      id=$(jq -r '.id // ""' "$f")
+      status=$(jq -r '.jira.status // ""' "$f")
+      source=$(jq -r '.metadata.source // ""' "$f")
+      next=$(jq -r '.noc.next_action // ""' "$f")
+      if [[ "$status" =~ ^([Dd]one|[Cc]losed|[Rr]esolved)$ ]]; then
+        printf '  %-10s Jira status is %s but ticket is still locally open\n' "$id" "$status"; needs=$((needs+1))
+      fi
+      if [[ "$source" == "manual" || "$source" == "migrated-manual" ]]; then
+        printf '  %-10s Jira fields are not Atlas-synced (source=%s)\n' "$id" "$source"; needs=$((needs+1))
+      fi
+      if [[ "$next" =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}[[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+        printf '  %-10s Next Action looks like a migrated timestamp: %s\n' "$id" "$next"; needs=$((needs+1))
+      fi
+    done
+    [ "$needs" -gt 0 ] || info "Review:" "None detected"
+  fi
+fi
+
+printf '\nInvestigations\n'
+if [ ! -d "$INV_DIR" ]; then
+  info "Investigations:" "None"
+else
+  mapfile -t invs < <(find "$INV_DIR" -mindepth 2 -maxdepth 2 -type f -name investigation.md -print 2>/dev/null | sort)
+  if [ ${#invs[@]} -eq 0 ]; then info "Investigations:" "None"; else
+    for f in "${invs[@]}"; do
+      name=$(basename "$(dirname "$f")")
+      status=$(grep -m1 '^- Status:' "$f" 2>/dev/null | sed 's/^- Status:[[:space:]]*//' || true)
+      printf '  %-28s %s\n' "$name" "${status:-[status not recorded]}"
+    done
+    info "Total:" "${#invs[@]}"
+  fi
+fi
+
+printf '\nHandover\n'
+if [ -s "$HANDOVER" ]; then ok "Created: $HANDOVER"; else warn "Not created for $US_DATE"; fi
+
+printf '\nDependencies\n'
+for cmd in atlas jq copilot tix noc-start noc-inv noc-handover; do
+  if command -v "$cmd" >/dev/null 2>&1; then
+    printf '  [OK]   %-14s %s\n' "$cmd" "$(command -v "$cmd")"
+  else
+    printf '  [WARN] %-14s not found\n' "$cmd"
+  fi
+done
+
+printf '\nRead-only status check complete. No records were changed.\n'

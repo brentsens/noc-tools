@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# noc-inv - create a handover-ready monitor/incident summary from the FINAL Datadog Notebook
+# Usage: noc-inv [NAME] [NOTEBOOK_URL]
+#        noc-inv --date YYYY-MM-DD [NAME] [NOTEBOOK_URL]
+#        noc-inv --open NAME
+set -euo pipefail
+
+NOC_ROOT="$HOME/noc"
+DAY="$(date +%F)"
+OPEN_AFTER=false
+NAME=""
+NOTEBOOK_URL=""
+
+usage(){ cat <<'TXT'
+Usage:
+  noc-inv
+  noc-inv NAME NOTEBOOK_URL
+  noc-inv --date YYYY-MM-DD NAME NOTEBOOK_URL
+  noc-inv --open NAME
+
+Workflow:
+  1. Investigate in Bits AI and document in the Datadog Notebook.
+  2. Run the separate M365 validation flow and review its SharePoint HTML report.
+  3. Re-check contradictions in Bits AI and update the Datadog Notebook yourself.
+  4. After the Notebook is final, run noc-inv with that Notebook URL.
+  5. noc-inv asks GitHub Copilot + Datadog MCP to create a handover-ready summary from Datadog evidence.
+  6. If MCP retrieval fails, enter the final Notebook findings manually.
+
+noc-inv does NOT perform or store the separate M365 validation report.
+TXT
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --date) [[ $# -ge 2 ]] || { echo "ERROR: --date requires YYYY-MM-DD" >&2; exit 1; }; DAY="$2"; shift 2 ;;
+    --open) OPEN_AFTER=true; shift; [[ $# -gt 0 ]] && NAME="$1" && shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) if [[ -z "$NAME" ]]; then NAME="$1"; elif [[ -z "$NOTEBOOK_URL" ]]; then NOTEBOOK_URL="$1"; else echo "ERROR: Unexpected argument: $1" >&2; exit 1; fi; shift ;;
+  esac
+done
+
+date -d "$DAY" >/dev/null 2>&1 || { echo "ERROR: Invalid date: $DAY" >&2; exit 1; }
+[[ -n "$NAME" ]] || read -rp "Investigation name: " NAME
+SAFE=$(printf '%s' "$NAME" | tr ' /' '--' | tr -cd '[:alnum:]_.-')
+[[ -n "$SAFE" ]] || { echo "ERROR: Invalid investigation name" >&2; exit 1; }
+
+SHIFT_DIR="$NOC_ROOT/$DAY"
+NOTES="$SHIFT_DIR/shift-notes.md"
+DIR="$SHIFT_DIR/investigations/$SAFE"
+EVIDENCE_DIR="$DIR/evidence"
+MAIN="$DIR/investigation.md"
+NOTEBOOK_FILE="$DIR/notebook-url.txt"
+RAW="$EVIDENCE_DIR/copilot-notebook-summary.md"
+LOG="$DIR/noc-inv.log"
+mkdir -p "$EVIDENCE_DIR"
+log(){ printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
+
+if $OPEN_AFTER && [[ -f "$MAIN" && -z "$NOTEBOOK_URL" ]]; then ${EDITOR:-nano} "$MAIN"; exit 0; fi
+[[ -n "$NOTEBOOK_URL" ]] || read -rp "FINAL Datadog Notebook URL: " NOTEBOOK_URL
+case "$NOTEBOOK_URL" in
+  https://app.datadoghq.com/notebook/*|https://app.datadoghq.eu/notebook/*|https://*.datadoghq.com/notebook/*|https://*.datadoghq.eu/notebook/*) ;;
+  *) echo "ERROR: That does not look like a Datadog Notebook URL." >&2; exit 1 ;;
+esac
+printf '%s\n' "$NOTEBOOK_URL" > "$NOTEBOOK_FILE"
+
+if [[ -s "$MAIN" ]]; then
+  echo "Investigation already exists: $MAIN"
+  echo "Nothing was overwritten."
+  echo "Open it with: noc-inv --open $SAFE"
+  exit 0
+fi
+
+log "START: $NAME"
+log "Final Datadog Notebook URL recorded"
+
+write_manual(){
+cat > "$MAIN" <<EOF2
+# Investigation: $NAME
+
+- Status: Reviewed Notebook Summary
+- Source of truth: Final Datadog Notebook
+- Datadog Notebook: $NOTEBOOK_URL
+- Capture method: Manual fallback
+
+## Summary
+
+## Service / Environment
+
+## Customer / Service Impact
+
+## Timeline
+
+## Confirmed Findings
+
+## Current Status
+
+## Actions Taken
+
+## Escalation / Ownership
+
+## Next Actions
+
+## Handover Summary
+
+EOF2
+  echo
+  echo "Manual fallback opened. Enter ONLY the findings from your final updated Datadog Notebook."
+  "${EDITOR:-nano}" "$MAIN"
+  log "Manual Notebook summary entered"
+}
+
+AUTOMATED=false
+if command -v copilot >/dev/null 2>&1; then
+  PROMPT=$(cat <<EOF2
+This is a READ-ONLY NOC documentation task based on a FINAL Datadog Notebook.
+Datadog Notebook URL: $NOTEBOOK_URL
+Use configured Datadog MCP tools to retrieve the notebook or directly supporting Datadog evidence.
+Do not modify Datadog or any external system.
+The separate M365 Copilot validation has already happened outside this script. Do NOT perform another validation pass and do NOT create a validation report.
+Do not claim notebook contents unless retrieved by a tool. Missing MCP results are not proof of absence.
+Return Markdown ONLY with exactly these headings:
+# Investigation: $NAME
+- Status: Reviewed Notebook Summary
+- Source of truth: Final Datadog Notebook
+- Datadog Notebook: $NOTEBOOK_URL
+- Capture method: Datadog MCP
+## Summary
+## Service / Environment
+## Customer / Service Impact
+## Timeline
+## Confirmed Findings
+## Current Status
+## Actions Taken
+## Escalation / Ownership
+## Next Actions
+## Handover Summary
+Use only facts supported by the final Notebook or retrieved Datadog evidence. Do not invent or infer root cause, impact, ticket status, ownership, or closure.
+EOF2
+)
+  echo; echo "[1] Reading final Datadog Notebook through Copilot / Datadog MCP"
+  TMP="$RAW.tmp"
+  if copilot -p "$PROMPT" > "$TMP" 2>>"$LOG" && [[ -s "$TMP" ]]; then
+    mv "$TMP" "$RAW"
+    cp "$RAW" "$MAIN"
+    AUTOMATED=true
+    log "Datadog MCP Notebook summary captured"
+  else
+    rm -f "$TMP"
+    log "WARNING: Datadog MCP Notebook retrieval failed"
+  fi
+else
+  log "WARNING: copilot CLI not found"
+fi
+
+if ! $AUTOMATED; then
+  echo
+  echo "[WARN] The final Notebook could not be captured through Datadog MCP."
+  echo "  1) Enter the final Notebook findings manually now"
+  echo "  2) Exit"
+  read -rp "Selection [1-2]: " choice
+  case "$choice" in 1) write_manual ;; 2) log "EXIT: manual fallback declined"; exit 1 ;; *) echo "Invalid selection." >&2; exit 1 ;; esac
+fi
+
+# Never copy raw MCP output or the external validation report into shift notes.
+# Only point the handover workflow to the reviewed Notebook-based local summary.
+if [[ -f "$NOTES" ]] && ! grep -Fq "Reviewed investigation: $NAME" "$NOTES"; then
+  printf '\n- %s Reviewed investigation: %s - Summary: %s - Datadog Notebook: %s\n' "$(date '+%H:%M')" "$NAME" "$MAIN" "$NOTEBOOK_URL" >> "$NOTES"
+  log "Reviewed investigation reference added to shift notes"
+fi
+
+log "SUCCESS"
+echo; echo "[2] Saved"
+echo "Reviewed investigation: $MAIN"
+echo "Datadog Notebook:       $NOTEBOOK_URL"
+echo "Log:                    $LOG"
+echo
+echo "This record is based on the final Notebook. The separate M365 validation report is not stored by noc-inv."
+if $OPEN_AFTER; then ${EDITOR:-nano} "$MAIN"; fi

@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# noc-handover - generate a NOC shift handover from shift notes, JSON tix records, and reviewed noc-inv investigations
+# Usage: noc-handover [--dd] [--send-self] [--force] [--yesterday | --date YYYY-MM-DD]
+set -uo pipefail
+
+NOC_ROOT="$HOME/noc"
+TIX_ROOT="$HOME/noc/tickets"
+TIX_OPEN_DIR="$TIX_ROOT/open"
+SHIFT_LABEL="4:00 PM - 12:00 AM"
+SHIFT_START="16:00"
+SHIFT_END="23:59"
+CUTOFF_HOUR=6
+MY_EMAIL="Brentsen.Smith@Sesami.io"
+SIGNATURE=$'Regards,\nBrentsen Smith\nNOC Engineer\n2025 W. Belt Line Rd. #114\nCarrollton, TX  75006\nsesami.io  |  LinkedIn'
+
+USE_DD=false
+SEND_SELF=false
+FORCE=false
+DAY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dd) USE_DD=true ;;
+    --send-self) SEND_SELF=true ;;
+    --force) FORCE=true ;;
+    --yesterday) DAY=$(date -d yesterday +%F) ;;
+    --date) [ $# -ge 2 ] || { echo "ERROR: --date requires YYYY-MM-DD" >&2; exit 1; }; DAY="$2"; shift ;;
+    -h|--help) sed -n '2,3p' "$0"; exit 0 ;;
+    *) echo "ERROR: Unknown option: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+if [ -z "$DAY" ]; then
+  if [ "$(date +%-H)" -lt "$CUTOFF_HOUR" ]; then DAY=$(date -d yesterday +%F); else DAY=$(date +%F); fi
+fi
+date -d "$DAY" >/dev/null 2>&1 || { echo "ERROR: Invalid date: $DAY" >&2; exit 1; }
+ok(){ printf '  [OK] %s\n' "$1"; }; warn(){ printf '  [WARN] %s\n' "$1"; }; fail(){ printf '  [ERROR] %s\n' "$1" >&2; exit 1; }
+
+SHIFT_DIR="$NOC_ROOT/$DAY"
+NOTES="$SHIFT_DIR/shift-notes.md"
+INV_DIR="$SHIFT_DIR/investigations"
+OUT_DIR="$SHIFT_DIR/handover"
+OUT="$OUT_DIR/handover-$DAY.md"
+TEMP_OUT="$OUT.tmp"
+PROMPT_FILE="$OUT_DIR/.handover-prompt.md"
+DD_FILE="$OUT_DIR/datadog-shift-activity.md"
+TIX_FILE="$OUT_DIR/open-tickets.json"
+INV_FILE="$OUT_DIR/reviewed-investigations.md"
+LOG="$OUT_DIR/noc-handover.log"
+US_DATE=$(date -d "$DAY" +%m/%d/%Y)
+mkdir -p "$OUT_DIR"
+log(){ printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
+log "========================================"; log "START: NOC handover"; log "Shift date: $DAY"
+cleanup(){ rm -f "$TEMP_OUT"; }; trap cleanup EXIT INT TERM
+
+echo; echo "=== NOC HANDOVER: $US_DATE ==="
+if [ -s "$OUT" ] && ! $FORCE; then
+  log "SKIPPED GENERATION: Handover already exists: $OUT"; ok "Handover already exists; generation skipped"; echo "  $OUT"
+  if ! $SEND_SELF; then echo; echo "Nothing was overwritten."; echo "Review: nano $OUT"; echo "Regenerate intentionally: noc-handover --date $DAY --force"; exit 0; fi
+fi
+
+if [ ! -s "$OUT" ] || $FORCE; then
+  echo; echo "[1] Inputs"; command -v copilot >/dev/null 2>&1 || fail "copilot not found"; command -v jq >/dev/null 2>&1 || fail "jq not found"
+  [ -f "$NOTES" ] || fail "Shift notes missing: $NOTES"
+  ok "Shift notes: $NOTES"; log "Shift notes found: $NOTES"
+
+  # Build a JSON array from the open tix JSON records. This reads the actual records,
+  # including description, rather than the human-readable `tix list` table.
+  echo; echo "[2] Open Ticket Records"
+  TIX_AVAILABLE=false; TIX_COUNT=0
+  shopt -s nullglob
+  TIX_RECORDS=("$TIX_OPEN_DIR"/*.json)
+  shopt -u nullglob
+  if [ ${#TIX_RECORDS[@]} -gt 0 ]; then
+    VALID_TIX=()
+    for f in "${TIX_RECORDS[@]}"; do
+      if jq -e 'type=="object" and (.id|type=="string") and (.jira|type=="object") and (.noc|type=="object")' "$f" >/dev/null 2>>"$LOG"; then
+        VALID_TIX+=("$f")
+      else
+        warn "Skipping invalid tix record: $f"; log "WARNING: invalid tix JSON skipped: $f"
+      fi
+    done
+    if [ ${#VALID_TIX[@]} -gt 0 ]; then
+      jq -s '.' "${VALID_TIX[@]}" > "$TIX_FILE"
+      TIX_AVAILABLE=true; TIX_COUNT=${#VALID_TIX[@]}
+      ok "Open JSON ticket records captured: $TIX_COUNT"; log "Open-ticket source: JSON tix records ($TIX_COUNT)"
+      jq -r '.[] | "  \(.id) | \(.jira.status // "") | \(.jira.assignee // "") | \(.jira.summary // "")"' "$TIX_FILE"
+    fi
+  fi
+  if ! $TIX_AVAILABLE; then rm -f "$TIX_FILE"; warn "No valid open JSON ticket records found"; log "Open-ticket source: none"; fi
+
+  echo; echo "[3] Reviewed Investigations"
+  INV_AVAILABLE=false; INV_COUNT=0; : > "$INV_FILE"
+  if [ -d "$INV_DIR" ]; then
+    while IFS= read -r inv; do
+      [ -s "$inv" ] || continue; INV_AVAILABLE=true; INV_COUNT=$((INV_COUNT+1)); { echo; echo "==================== REVIEWED INVESTIGATION $INV_COUNT ===================="; echo "Source file: $inv"; cat "$inv"; } >> "$INV_FILE"; log "Reviewed investigation included: $inv"
+    done < <(find "$INV_DIR" -mindepth 2 -maxdepth 2 -type f -name 'investigation.md' -print 2>/dev/null | sort)
+  fi
+  if $INV_AVAILABLE; then ok "Reviewed investigations captured: $INV_COUNT"; else rm -f "$INV_FILE"; warn "No reviewed noc-inv investigations found for this shift"; fi
+
+  PREV=""
+  while IFS= read -r f; do [ -n "$f" ] || continue; d=$(basename "$f" .md); d=${d#handover-}; if [[ "$d" < "$DAY" ]]; then PREV="$f"; fi; done < <(find "$NOC_ROOT" -type f -path '*/handover/handover-*.md' -print 2>/dev/null | sort)
+  if [ -n "$PREV" ]; then ok "Previous handover: $PREV"; log "Previous handover found: $PREV"; else warn "No earlier handover found"; fi
+
+  echo; echo "[4] Datadog"
+  if $USE_DD; then
+    log "Starting Datadog MCP query"
+    if copilot -p "Using the Datadog MCP tools only (read-only; change nothing), list monitors that alerted between $DAY $SHIFT_START and $SHIFT_END America/Chicago. For each, give monitor name, environment, time triggered, whether it recovered, and current status. If none, say 'No alerts during shift.' Output plain Markdown only." > "$DD_FILE" 2>>"$LOG"; then ok "Datadog activity saved: $DD_FILE"; else warn "Datadog query failed; continuing without it"; rm -f "$DD_FILE"; fi
+  else warn "Skipped (use --dd)"; fi
+
+  {
+    cat <<EOF2
+Write a NOC shift handover email body in Markdown. Output ONLY the email body.
+
+GENERAL RULES
+- Use only facts from the supplied inputs.
+- Never invent tickets, statuses, root causes, impact, owners, dates, or numbers.
+- If a root cause is not confirmed, explicitly say it is unconfirmed.
+- Keep ticket identifiers exactly as written.
+- Use plain, direct, professional wording.
+
+TICKET RULES
+- OPEN TIX JSON RECORDS is the primary source for which tickets are currently open.
+- Each record separates Jira-owned fields under jira from NOC-owned fields under noc.
+- Jira description is CONTEXT for understanding the ticket. Do not reproduce the full Jira description in the handover.
+- Create a concise handover summary for each open ticket using only supported facts from id, jira.summary, jira.description, jira.status, jira.assignee, jira.priority, noc.environment, noc.next_action, and noc.notes.
+- Preserve the current Jira status and assignee when present.
+- Preserve noc.next_action exactly in meaning; do not invent a replacement next action.
+- Do not infer customer impact, root cause, resolution, ownership, or closure from the description.
+- Do not copy reproduction steps, long device lists, tables, raw logs, or implementation detail unless specifically necessary for the next shift's stated action.
+- A Jira status such as Done does not automatically mean the local tix record should be treated as closed. If it exists in OPEN TIX JSON RECORDS, it is still locally tracked as open.
+- Put NOC-* tickets under Open Jira Tickets.
+- Put SF tickets under Open Salesforce Tickets when present.
+- Put SDP-* tickets under Open DevOps Tickets when present.
+- If no JSON ticket records are supplied, use shift notes and the previous handover only as fallback context and do not invent an open-ticket list.
+
+INVESTIGATION RULES
+- FINAL REVIEWED INVESTIGATIONS contains local noc-inv records created from the final updated Datadog Notebook.
+- Treat those reviewed records as the primary source for investigation findings when present.
+- Prioritize Handover Summary when populated.
+- Do not promote probable, unconfirmed, or contradicted information to confirmed fact.
+- Include unresolved investigation actions under Next Shift Actions.
+
+FORMAT
+Hi Team,
+
+Please see the handover for the $SHIFT_LABEL shift on $US_DATE.
+
+## Summary
+Write 2-4 concise sentences summarizing the operational state of the shift.
+
+Focus only on:
+- overall service/monitoring health
+- significant alerts or recoveries
+- material investigations
+- meaningful escalations or unresolved operational risk
+
+Do NOT mention:
+- tix
+- JSON
+- ticket records
+- local tracking
+- source precedence
+- Atlas
+- Copilot
+- MCP
+- how tickets or investigations were retrieved
+- internal automation behavior
+
+Do not count or enumerate open tickets in the Summary unless the count itself is operationally significant.
+Ticket details belong in the Open Jira Tickets, Open Salesforce Tickets, and Open DevOps Tickets sections.
+If there were no material operational events, simply state that the shift was quiet/stable and note any significant work that remains ongoing.
+
+## Monitoring / Alert Update
+Use a short subsection or bullets for each alert or issue. Omit if none.
+
+## Investigation Updates
+Summarize each relevant reviewed investigation. Omit if none.
+
+## Monitoring & Alerting Improvements
+Use a short subsection or bullets for each change. Omit if none.
+
+## Open Salesforce Tickets
+Use one concise line per ticket. If none, write: No open Salesforce tickets.
+
+## Open Jira Tickets
+Use one concise line per NOC-* ticket. Include ticket ID, short problem summary, current Jira status, assignee when present, environment when useful, and the NOC next action when provided. Use Jira description only as context to make the short problem summary accurate.
+
+## Open DevOps Tickets
+Use one concise line per SDP-* ticket. Omit if none.
+
+## Next Shift Actions
+Use bullets. Include unresolved ticket next actions and unresolved reviewed investigations. Do not duplicate completed actions.
+
+Please tag me if any clarification is needed.
+
+$SIGNATURE
+
+==================== INPUT: SHIFT NOTES ($US_DATE) ====================
+EOF2
+    cat "$NOTES"
+    if $TIX_AVAILABLE && [ -s "$TIX_FILE" ]; then echo; echo "==================== INPUT: OPEN TIX JSON RECORDS (PRIMARY FOR OPEN TICKETS) ===================="; cat "$TIX_FILE"; fi
+    if $INV_AVAILABLE && [ -s "$INV_FILE" ]; then echo; echo "==================== INPUT: FINAL REVIEWED INVESTIGATIONS ===================="; cat "$INV_FILE"; fi
+    if [ -n "$PREV" ]; then echo; echo "==================== INPUT: PREVIOUS HANDOVER (SUPPORTING CONTEXT) ===================="; cat "$PREV"; fi
+    if [ -s "$DD_FILE" ]; then echo; echo "==================== INPUT: DATADOG SHIFT ACTIVITY ===================="; cat "$DD_FILE"; fi
+  } > "$PROMPT_FILE"
+
+  echo; echo "[5] Generating handover"; log "Starting Copilot generation"
+  if ! copilot -p "$(cat "$PROMPT_FILE")" > "$TEMP_OUT" 2>>"$LOG"; then log "FAILED: Copilot generation failed"; fail "Copilot generation failed. See $LOG"; fi
+  [ -s "$TEMP_OUT" ] || { log "FAILED: Copilot returned empty output"; fail "Copilot returned nothing. See $LOG"; }
+  mv "$TEMP_OUT" "$OUT"; log "Handover created: $OUT"; $INV_AVAILABLE && log "Investigation source: noc-inv reviewed records ($INV_COUNT)"; log "SUCCESS"; ok "Saved $OUT"
+fi
+
+echo; echo "------------------------------------------------------------"; cat "$OUT"; echo "------------------------------------------------------------"; echo "Subject: NOC Shift Handover - $US_DATE"; echo "Review/edit: nano $OUT"; echo "Log:         $LOG"
+if $SEND_SELF; then
+  command -v copilot >/dev/null 2>&1 || fail "copilot not found"; log "Opening send-to-self review"; echo; echo "[6] Opening Copilot to email the handover to you only"; echo "    Review the dry run, then type 'send' only if it is correct."; cd "$OUT_DIR" || exit 1
+  exec copilot -i "Using the m365 CLI skill, send an email ONLY to $MY_EMAIL. Never add any other To, Cc, or Bcc recipient. Subject: NOC Shift Handover - $US_DATE. Convert the contents of $OUT to clean HTML with headings, paragraphs, inline code, and bullet lists. First run a dry run and show me the recipient, subject, and preview. Wait for me to type 'send' before the real send."
+fi

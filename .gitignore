@@ -1,0 +1,25 @@
+# Secrets / credentials
+.env
+*.env
+*.key
+*.pem
+credentials*
+secrets*
+
+# Runtime and temporary data
+*.tmp
+*.log
+*.bak
+*.backup
+*~
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Never commit operational NOC data
+tickets/
+investigations/
+handover/
+shift-notes.md

@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# noc-test - isolated regression tests for the NOC automation stack
+# Usage: noc-test [--keep]
+set -uo pipefail
+
+KEEP=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keep) KEEP=true ;;
+    -h|--help) sed -n '2,3p' "$0"; exit 0 ;;
+    *) echo "ERROR: Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+PASS=0; FAIL=0; SKIP=0
+pass(){ PASS=$((PASS+1)); printf '  [PASS] %s\n' "$1"; }
+fail(){ FAIL=$((FAIL+1)); printf '  [FAIL] %s\n' "$1"; }
+skip(){ SKIP=$((SKIP+1)); printf '  [SKIP] %s\n' "$1"; }
+assert_eq(){ local got="$1" want="$2" name="$3"; [[ "$got" == "$want" ]] && pass "$name" || { fail "$name (got: $got; expected: $want)"; return 1; }; }
+
+for req in bash jq sha256sum mktemp; do
+  command -v "$req" >/dev/null 2>&1 || { echo "ERROR: $req is required" >&2; exit 2; }
+done
+
+# Capture production command paths before replacing HOME/PATH.
+declare -A PROD
+for cmd in tix noc-start noc-status noc-inv noc-handover; do PROD[$cmd]=$(command -v "$cmd" 2>/dev/null || true); done
+
+LAB=$(mktemp -d "${TMPDIR:-/tmp}/noc-test.XXXXXX")
+TEST_HOME="$LAB/home"
+MOCK_BIN="$LAB/bin"
+mkdir -p "$TEST_HOME/noc/tickets/open" "$TEST_HOME/noc/tickets/closed" "$MOCK_BIN"
+cleanup(){ if $KEEP; then echo "Test lab retained: $LAB"; else rm -rf "$LAB"; fi; }
+trap cleanup EXIT INT TERM
+
+# Link installed scripts into the isolated PATH. No test writes to production HOME.
+for cmd in tix noc-start noc-status noc-inv noc-handover; do
+  if [[ -n "${PROD[$cmd]}" ]]; then ln -s "${PROD[$cmd]}" "$MOCK_BIN/$cmd"; fi
+done
+
+# Safe mocks. Atlas mode and response are controlled by files inside the lab.
+cat > "$MOCK_BIN/atlas" <<'MOCK'
+#!/usr/bin/env bash
+mode=$(cat "${MOCK_STATE:?}/atlas-mode" 2>/dev/null || echo success)
+if [[ "${1:-}" == "--help" ]]; then echo 'mock atlas'; exit 0; fi
+if [[ "$mode" == "authfail" ]]; then exit 4; fi
+if [[ "$mode" == "servicefail" ]]; then exit 5; fi
+if [[ "$mode" == "notfound" ]]; then exit 6; fi
+cat "${MOCK_STATE:?}/atlas-response.json"
+MOCK
+chmod +x "$MOCK_BIN/atlas"
+
+cat > "$MOCK_BIN/copilot" <<'MOCK'
+#!/usr/bin/env bash
+if [[ -f "${MOCK_STATE:?}/copilot-fail" ]]; then exit 1; fi
+if [[ -f "${MOCK_STATE:?}/copilot-output" ]]; then cat "${MOCK_STATE:?}/copilot-output"; else echo '# Mock Copilot Output'; fi
+MOCK
+chmod +x "$MOCK_BIN/copilot"
+
+export HOME="$TEST_HOME"
+export MOCK_STATE="$LAB/state"
+export PATH="$MOCK_BIN:/usr/bin:/bin"
+mkdir -p "$MOCK_STATE"
+printf 'success\n' > "$MOCK_STATE/atlas-mode"
+
+printf '\nNOC TEST - ISOLATED LAB\n'
+printf '%s\n' '============================================================'
+printf 'Production data path used: no\n'
+printf 'Test HOME: %s\n' "$HOME"
+
+printf '\n1. Installed Script Syntax\n'
+for cmd in tix noc-start noc-status noc-inv noc-handover; do
+  if [[ -z "${PROD[$cmd]}" ]]; then skip "$cmd not installed"; continue; fi
+  if bash -n "${PROD[$cmd]}" >/dev/null 2>&1; then pass "$cmd syntax valid"; else fail "$cmd syntax invalid"; fi
+done
+
+if [[ -z "${PROD[tix]}" ]]; then
+  skip "tix regression tests skipped; tix not installed"
+else
+  printf '\n2. tix Manual Fallback\n'
+  printf 'authfail\n' > "$MOCK_STATE/atlas-mode"
+  manual_input=$'1\nManual issue\nManual description\nOpen\nNOC\nMedium\nTEST\nInvestigate manually\nSynthetic notes\ny\n'
+  if printf '%s' "$manual_input" | tix add NOC-9001 >"$LAB/manual.out" 2>&1; then
+    rec="$HOME/noc/tickets/open/NOC-9001.json"
+    [[ -f "$rec" ]] && pass "manual fallback created JSON record" || fail "manual fallback record missing"
+    assert_eq "$(jq -r '.metadata.source' "$rec")" "manual" "manual source recorded"
+    assert_eq "$(jq -r '.jira.description' "$rec")" "Manual description" "manual Jira description recorded"
+    assert_eq "$(jq -r '.noc.next_action' "$rec")" "Investigate manually" "manual NOC next action recorded"
+  else
+    fail "manual fallback command failed"
+  fi
+
+  printf '\n3. tix Atlas Add\n'
+  printf 'success\n' > "$MOCK_STATE/atlas-mode"
+  cat > "$MOCK_STATE/atlas-response.json" <<'JSON'
+{"key":"NOC-9002","summary":"Synthetic Atlas issue","description":"Synthetic Jira description","status":"Escalated","assignee":"Test Engineer","priority":"Medium"}
+JSON
+  atlas_input=$'LAB\nPending synthetic validation\nNo production data\ny\n'
+  if printf '%s' "$atlas_input" | tix add NOC-9002 >"$LAB/atlas-add.out" 2>&1; then
+    rec2="$HOME/noc/tickets/open/NOC-9002.json"
+    assert_eq "$(jq -r '.metadata.source' "$rec2")" "atlas" "Atlas source recorded"
+    assert_eq "$(jq -r '.jira.status' "$rec2")" "Escalated" "Atlas status parsed"
+    assert_eq "$(jq -r '.jira.assignee' "$rec2")" "Test Engineer" "Atlas assignee parsed"
+    assert_eq "$(jq -r '.noc.environment' "$rec2")" "LAB" "NOC environment recorded"
+  else
+    fail "Atlas add command failed"
+  fi
+
+  printf '\n4. tix Duplicate Protection\n'
+  before=$(sha256sum "$rec2" | awk '{print $1}')
+  if printf 'x\n' | tix add NOC-9002 >"$LAB/duplicate.out" 2>&1; then fail "duplicate add unexpectedly succeeded"; else pass "duplicate add rejected"; fi
+  after=$(sha256sum "$rec2" | awk '{print $1}')
+  assert_eq "$after" "$before" "duplicate attempt preserved record"
+
+  printf '\n5. tix Sync Decline\n'
+  cat > "$MOCK_STATE/atlas-response.json" <<'JSON'
+{"key":"NOC-9002","summary":"Changed Jira title","description":"Changed Jira description","status":"Done","assignee":"Changed Owner","priority":"Highest"}
+JSON
+  before=$(sha256sum "$rec2" | awk '{print $1}')
+  if printf 'n\n' | tix sync NOC-9002 >"$LAB/sync-decline.out" 2>&1; then pass "sync decline completed safely"; else fail "sync decline command failed"; fi
+  after=$(sha256sum "$rec2" | awk '{print $1}')
+  assert_eq "$after" "$before" "declined sync preserved entire record"
+
+  printf '\n6. tix Sync Accept / NOC Preservation\n'
+  old_env=$(jq -r '.noc.environment' "$rec2")
+  old_next=$(jq -r '.noc.next_action' "$rec2")
+  old_notes=$(jq -r '.noc.notes' "$rec2")
+  if printf 'y\n' | tix sync NOC-9002 >"$LAB/sync-accept.out" 2>&1; then
+    pass "approved sync completed"
+    assert_eq "$(jq -r '.jira.status' "$rec2")" "Done" "sync updated Jira status"
+    assert_eq "$(jq -r '.jira.assignee' "$rec2")" "Changed Owner" "sync updated Jira assignee"
+    assert_eq "$(jq -r '.noc.environment' "$rec2")" "$old_env" "sync preserved NOC environment"
+    assert_eq "$(jq -r '.noc.next_action' "$rec2")" "$old_next" "sync preserved NOC next action"
+    assert_eq "$(jq -r '.noc.notes' "$rec2")" "$old_notes" "sync preserved NOC notes"
+  else
+    fail "approved sync failed"
+  fi
+
+  printf '\n7. tix Atlas Failure Preservation\n'
+  before=$(sha256sum "$rec2" | awk '{print $1}')
+  printf 'servicefail\n' > "$MOCK_STATE/atlas-mode"
+  if tix sync NOC-9002 >"$LAB/sync-fail.out" 2>&1; then fail "failed Atlas sync unexpectedly returned success"; else pass "Atlas failure reported"; fi
+  after=$(sha256sum "$rec2" | awk '{print $1}')
+  assert_eq "$after" "$before" "Atlas failure preserved existing record"
+  printf 'success\n' > "$MOCK_STATE/atlas-mode"
+fi
+
+printf '\n8. noc-status Read-Only Check\n'
+if [[ -z "${PROD[noc-status]}" ]]; then
+  skip "noc-status not installed"
+else
+  mkdir -p "$HOME/noc/2026-10-16"
+  printf '# Synthetic shift\n- test only\n' > "$HOME/noc/2026-10-16/shift-notes.md"
+  before=$(find "$HOME/noc" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+  if noc-status --date 2026-10-16 >"$LAB/status.out" 2>&1; then pass "noc-status executed"; else fail "noc-status failed"; fi
+  after=$(find "$HOME/noc" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+  assert_eq "$after" "$before" "noc-status changed no test records"
+fi
+
+printf '\n9. noc-handover Overwrite Protection\n'
+if [[ -z "${PROD[noc-handover]}" ]]; then
+  skip "noc-handover not installed"
+else
+  mkdir -p "$HOME/noc/2026-10-16/handover"
+  handover="$HOME/noc/2026-10-16/handover/handover-2026-10-16.md"
+  printf 'ORIGINAL HANDOVER\n' > "$handover"
+  before=$(sha256sum "$handover" | awk '{print $1}')
+  if noc-handover --date 2026-10-16 >"$LAB/handover.out" 2>&1; then pass "existing handover caused safe skip"; else fail "handover overwrite-protection command failed"; fi
+  after=$(sha256sum "$handover" | awk '{print $1}')
+  assert_eq "$after" "$before" "existing handover was not overwritten"
+fi
+
+printf '\n10. noc-inv Invalid URL Rejection\n'
+if [[ -z "${PROD[noc-inv]}" ]]; then
+  skip "noc-inv not installed"
+else
+  if printf 'synthetic-investigation\nhttps://example.invalid/not-a-notebook\n' | noc-inv >"$LAB/inv-invalid.out" 2>&1; then
+    fail "invalid Notebook URL unexpectedly accepted"
+  else
+    pass "invalid Notebook URL rejected"
+  fi
+  if find "$HOME/noc" -path '*/investigations/synthetic-investigation/investigation.md' -print -quit | grep -q .; then fail "invalid URL created investigation record"; else pass "invalid URL created no investigation record"; fi
+fi
+
+printf '\nResult\n'
+printf '  Passed:  %d\n' "$PASS"
+printf '  Failed:  %d\n' "$FAIL"
+printf '  Skipped: %d\n' "$SKIP"
+if [ "$FAIL" -gt 0 ]; then
+  printf '  Status:  FAILED\n\n'
+  echo "Inspect retained output with: noc-test --keep"
+  exit 1
+else
+  printf '  Status:  PASSED\n\n'
+  exit 0
+fi

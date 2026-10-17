@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# tix - local NOC ticket tracker with Atlas/Jira-backed add and manual fallback
+set -euo pipefail
+ROOT="${TIX_ROOT:-$HOME/noc/tickets}"
+OPEN_DIR="$ROOT/open"; CLOSED_DIR="$ROOT/closed"; HISTORY="$ROOT/history.log"
+LEGACY_OPEN="$ROOT/open.tsv"; LEGACY_CLOSED="$ROOT/closed.tsv"
+mkdir -p "$OPEN_DIR" "$CLOSED_DIR"; touch "$HISTORY"
+now_iso(){ date -Iseconds; }; now_log(){ date '+%Y-%m-%d %H:%M:%S'; }
+die(){ echo "ERROR: $*" >&2; exit 1; }; warn(){ echo "[WARN] $*" >&2; }
+need(){ command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+need jq
+usage(){ cat <<'TXT'
+Usage:
+  tix add TICKET_ID
+  tix list
+  tix show TICKET_ID
+  tix update TICKET_ID
+  tix sync TICKET_ID
+  tix history [TICKET_ID]
+  tix close TICKET_ID
+  tix migrate
+
+Jira-style IDs are retrieved with: atlas jira get TICKET_ID
+If Atlas fails, add offers manual entry. tix does not write shift-notes.md.
+TXT
+}
+file_for(){ printf '%s/%s.json' "$OPEN_DIR" "$1"; }
+closed_file_for(){ printf '%s/%s.json' "$CLOSED_DIR" "$1"; }
+valid_id(){ [[ "$1" =~ ^[A-Z][A-Z0-9_]*-[0-9]+$ ]]; }
+
+parse_atlas(){
+ local requested="$1" file="$2"; jq -e . "$file" >/dev/null 2>&1 || return 1
+ jq -c --arg requested "$requested" '
+  def scalar: if .==null then "" elif type=="string" then . elif type=="object" then (.name // .displayName // .display_name // .value // "") else tostring end;
+  def bodytext: if .==null then "" elif type=="string" then . elif type=="object" or type=="array" then [..|objects|.text? // empty]|join(" ") else tostring end;
+  (.key // .issue.key // .fields.key // "") as $key |
+  (.fields.summary // .summary // .issue.fields.summary // "" | scalar) as $summary |
+  (.fields.description // .description // .issue.fields.description // "" | bodytext) as $d0 |
+  (.fields.status // .status // .issue.fields.status // "" | scalar) as $status |
+  (.fields.assignee // .assignee // .issue.fields.assignee // "" | bodytext) as $a0 |
+  (.fields.priority // .priority // .issue.fields.priority // "" | scalar) as $priority |
+  ($a0|startswith("Summary of Request:")) as $body |
+  (if $body then ($d0 + (if $d0=="" then "" else "\n\n" end) + $a0) else $d0 end) as $description |
+  (if $body then "" else $a0 end) as $assignee |
+  if $key != $requested then halt_error(22) elif $summary=="" then halt_error(23)
+  else {key:$key,summary:$summary,description:$description,status:$status,assignee:$assignee,priority:$priority} end
+ ' "$file"
+}
+atlas_failure_text(){ case "$1" in 3) echo "Atlas configuration/usage problem";;4) echo "Atlas authentication problem";;5) echo "Jira/Atlas service problem";;6) echo "Ticket not found";;*) echo "Atlas failed with exit code $1";;esac; }
+
+write_record(){
+ local out="$1" created="$2" source="$3" synced="$4"
+ jq -n --arg id "$ID" --arg summary "$SUMMARY" --arg description "$DESCRIPTION" --arg status "$STATUS" --arg assignee "$ASSIGNEE" --arg priority "$PRIORITY" --arg environment "$ENVIRONMENT" --arg next_action "$NEXT_ACTION" --arg notes "$NOC_NOTES" --arg source "$source" --arg created "$created" --arg synced "$synced" \
+ '{id:$id,jira:{summary:$summary,description:$description,status:$status,assignee:$assignee,priority:$priority},noc:{environment:$environment,next_action:$next_action,notes:$notes},metadata:{source:$source,created:$created,last_synced:(if $synced=="" then null else $synced end)}}' > "$out"
+ jq -e . "$out" >/dev/null || die "Generated record failed JSON validation"
+}
+manual_jira(){ SOURCE=manual; LAST_SYNC=""; echo; echo "MANUAL TICKET ENTRY - $ID"; read -rp "Summary: " SUMMARY; [[ -n "$SUMMARY" ]]||die "Summary required"; read -rp "Description: " DESCRIPTION; read -rp "Status: " STATUS; read -rp "Assignee / Owner: " ASSIGNEE; read -rp "Priority (optional): " PRIORITY; }
+read_noc(){ echo; echo "NOC INFORMATION"; read -rp "Environment: " ENVIRONMENT; read -rp "Next Action: " NEXT_ACTION; read -rp "NOC Notes (optional): " NOC_NOTES; }
+review(){ echo; echo "REVIEW $ID"; printf '  Summary:      %s\n  Description:  %s\n  Status:       %s\n  Assignee:     %s\n  Priority:     %s\n\n  Environment:  %s\n  Next Action:  %s\n  NOC Notes:    %s\n\n  Source:       %s\n  Jira Sync:    %s\n' "$SUMMARY" "${DESCRIPTION:-[not provided]}" "${STATUS:-[not provided]}" "${ASSIGNEE:-[not provided]}" "${PRIORITY:-[not provided]}" "${ENVIRONMENT:-[not provided]}" "${NEXT_ACTION:-[not provided]}" "${NOC_NOTES:-[none]}" "$SOURCE" "${LAST_SYNC:-Never}"; }
+
+add_ticket(){
+ ID="$1"; valid_id "$ID"||die "Unsupported Jira ticket ID: $ID"; DEST=$(file_for "$ID"); [[ ! -e "$DEST" ]]||die "$ID is already tracked"
+ local td atlas_json tmp rc parsed choice; td=$(mktemp -d); atlas_json="$td/atlas.json"; tmp="$td/record.json"; trap 'rm -rf "${td:-}"' RETURN
+ SOURCE=""; LAST_SYNC=""; SUMMARY=""; DESCRIPTION=""; STATUS=""; ASSIGNEE=""; PRIORITY=""; ENVIRONMENT=""; NEXT_ACTION=""; NOC_NOTES=""
+ if command -v atlas >/dev/null 2>&1; then
+  while true; do
+   echo "Fetching $ID from Jira with Atlas..."; set +e; atlas jira get "$ID" > "$atlas_json"; rc=$?; set -e
+   if [[ $rc -eq 0 ]]; then set +e; parsed=$(parse_atlas "$ID" "$atlas_json"); rc=$?; set -e; if [[ $rc -eq 0 && -n "$parsed" ]]; then SOURCE=atlas; LAST_SYNC=$(now_iso); SUMMARY=$(jq -r .summary<<<"$parsed"); DESCRIPTION=$(jq -r .description<<<"$parsed"); STATUS=$(jq -r .status<<<"$parsed"); ASSIGNEE=$(jq -r .assignee<<<"$parsed"); PRIORITY=$(jq -r .priority<<<"$parsed"); echo; echo "JIRA TICKET FOUND"; printf 'Ticket:      %s\nSummary:     %s\nDescription: %s\nStatus:      %s\nAssignee:    %s\nPriority:    %s\n' "$ID" "$SUMMARY" "${DESCRIPTION:-[not provided]}" "${STATUS:-[not provided]}" "${ASSIGNEE:-[not provided]}" "${PRIORITY:-[not provided]}"; break; fi; warn "Atlas JSON could not be safely mapped to $ID"; else warn "$(atlas_failure_text "$rc")"; fi
+   echo "1) Enter manually"; echo "2) Retry Atlas"; echo "3) Cancel"; read -rp "Selection [1-3]: " choice; case "$choice" in 1) manual_jira; break;;2) continue;;3) echo "Canceled. Nothing saved."; return;;*) warn "Invalid selection";;esac
+  done
+ else warn "atlas is not available"; read -rp "Enter manually? [y/N]: " choice; [[ "$choice" =~ ^[Yy]$ ]]||return; manual_jira; fi
+ read_noc; local created; created=$(now_iso); write_record "$tmp" "$created" "$SOURCE" "$LAST_SYNC"; review; read -rp "Save ticket? [y/N]: " choice; [[ "$choice" =~ ^[Yy]$ ]]||{ echo "Canceled. Nothing saved."; return; }; [[ ! -e "$DEST" ]]||die "$ID appeared while adding"; mv "$tmp" "$DEST"; printf '%s | %s | ADDED | source=%s\n' "$(now_log)" "$ID" "$SOURCE" >> "$HISTORY"; echo "Added $ID"; echo "Saved: $DEST"
+}
+
+
+sync_ticket(){
+  ID="$1"
+  local f td atlas_json parsed rc choice tmp old_summary old_description old_status old_assignee old_priority new_summary new_description new_status new_assignee new_priority sync_time
+  f=$(file_for "$ID")
+  [[ -f "$f" ]] || die "$ID is not open"
+  command -v atlas >/dev/null 2>&1 || die "atlas is required for sync"
+
+  td=$(mktemp -d)
+  atlas_json="$td/atlas.json"
+  tmp="$td/record.json"
+  trap 'rm -rf "${td:-}"' RETURN
+
+  echo "Fetching $ID from Jira with Atlas..."
+  set +e
+  atlas jira get "$ID" > "$atlas_json"
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    warn "$(atlas_failure_text "$rc"). Existing record was not changed."
+    return 1
+  fi
+
+  set +e
+  parsed=$(parse_atlas "$ID" "$atlas_json")
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 || -z "$parsed" ]]; then
+    warn "Atlas JSON could not be safely mapped to $ID. Existing record was not changed."
+    return 1
+  fi
+
+  old_summary=$(jq -r '.jira.summary // ""' "$f")
+  old_description=$(jq -r '.jira.description // ""' "$f")
+  old_status=$(jq -r '.jira.status // ""' "$f")
+  old_assignee=$(jq -r '.jira.assignee // ""' "$f")
+  old_priority=$(jq -r '.jira.priority // ""' "$f")
+
+  new_summary=$(jq -r '.summary // ""' <<<"$parsed")
+  new_description=$(jq -r '.description // ""' <<<"$parsed")
+  new_status=$(jq -r '.status // ""' <<<"$parsed")
+  new_assignee=$(jq -r '.assignee // ""' <<<"$parsed")
+  new_priority=$(jq -r '.priority // ""' <<<"$parsed")
+
+  echo
+  echo "JIRA SYNC PREVIEW - $ID"
+  echo "Only Jira-managed fields will change. NOC Environment, Next Action, and NOC Notes will be preserved."
+  echo
+  printf '%-13s | %-30s | %s
+' "FIELD" "LOCAL" "JIRA"
+  printf '%s
+' "------------------------------------------------------------------------------------------"
+  printf '%-13s | %-30.30s | %.60s
+' "Summary" "$old_summary" "$new_summary"
+  printf '%-13s | %-30.30s | %.60s
+' "Description" "$old_description" "$new_description"
+  printf '%-13s | %-30.30s | %.60s
+' "Status" "$old_status" "$new_status"
+  printf '%-13s | %-30.30s | %.60s
+' "Assignee" "$old_assignee" "$new_assignee"
+  printf '%-13s | %-30.30s | %.60s
+' "Priority" "$old_priority" "$new_priority"
+  echo
+  echo "NOC fields preserved:"
+  printf '  Environment: %s
+' "$(jq -r '.noc.environment // ""' "$f")"
+  printf '  Next Action: %s
+' "$(jq -r '.noc.next_action // ""' "$f")"
+  printf '  NOC Notes:   %s
+' "$(jq -r '.noc.notes // ""' "$f")"
+
+  if [[ "$old_summary" == "$new_summary" && "$old_description" == "$new_description" && "$old_status" == "$new_status" && "$old_assignee" == "$new_assignee" && "$old_priority" == "$new_priority" ]]; then
+    echo
+    echo "No Jira field changes detected."
+  fi
+
+  read -rp "Apply Jira updates? [y/N]: " choice
+  [[ "$choice" =~ ^[Yy]$ ]] || { echo "Canceled. Existing record was not changed."; return 0; }
+
+  sync_time=$(now_iso)
+  jq     --arg summary "$new_summary"     --arg description "$new_description"     --arg status "$new_status"     --arg assignee "$new_assignee"     --arg priority "$new_priority"     --arg synced "$sync_time"     '.jira.summary=$summary |
+     .jira.description=$description |
+     .jira.status=$status |
+     .jira.assignee=$assignee |
+     .jira.priority=$priority |
+     .metadata.source="atlas" |
+     .metadata.last_synced=$synced' "$f" > "$tmp"
+
+  jq -e . "$tmp" >/dev/null || die "Synced record failed JSON validation"
+  [[ "$(jq -r '.id' "$tmp")" == "$ID" ]] || die "Synced record ID mismatch"
+  mv "$tmp" "$f"
+
+  printf '%s | %s | SYNC | source=atlas
+' "$(now_log)" "$ID" >> "$HISTORY"
+  [[ "$old_summary" == "$new_summary" ]] || printf '%s | %s | SYNC_CHANGE | summary updated
+' "$(now_log)" "$ID" >> "$HISTORY"
+  [[ "$old_description" == "$new_description" ]] || printf '%s | %s | SYNC_CHANGE | description updated
+' "$(now_log)" "$ID" >> "$HISTORY"
+  [[ "$old_status" == "$new_status" ]] || printf '%s | %s | SYNC_CHANGE | status: %s -> %s
+' "$(now_log)" "$ID" "$old_status" "$new_status" >> "$HISTORY"
+  [[ "$old_assignee" == "$new_assignee" ]] || printf '%s | %s | SYNC_CHANGE | assignee: %s -> %s
+' "$(now_log)" "$ID" "$old_assignee" "$new_assignee" >> "$HISTORY"
+  [[ "$old_priority" == "$new_priority" ]] || printf '%s | %s | SYNC_CHANGE | priority: %s -> %s
+' "$(now_log)" "$ID" "$old_priority" "$new_priority" >> "$HISTORY"
+
+  echo "Synced $ID from Jira."
+  echo "NOC-managed fields were preserved."
+}
+
+list_tickets(){
+ shopt -s nullglob; local fs=("$OPEN_DIR"/*.json); if ((${#fs[@]}==0)); then echo "No open JSON tickets."; [[ -s "$LEGACY_OPEN" ]]&&echo "Legacy open.tsv exists; run: tix migrate"; return; fi
+ printf '%-12s %-10s %-16s %-20s %-10s %s\n' TICKET ENV STATUS ASSIGNEE SOURCE SUMMARY
+ for f in "${fs[@]}"; do jq -r '[.id,.noc.environment,.jira.status,.jira.assignee,.metadata.source,.jira.summary]|@tsv' "$f"|awk -F '\t' '{printf "%-12s %-10s %-16s %-20s %-10s %s\n",$1,$2,$3,$4,$5,$6}'; done
+}
+show_ticket(){ local f; f=$(file_for "$1"); [[ -f "$f" ]]||die "$1 is not open"; jq . "$f"; }
+update_ticket(){
+ local f v; ID="$1"; f=$(file_for "$ID"); [[ -f "$f" ]]||die "$ID is not open"; ENVIRONMENT=$(jq -r '.noc.environment//""' "$f"); NEXT_ACTION=$(jq -r '.noc.next_action//""' "$f"); NOC_NOTES=$(jq -r '.noc.notes//""' "$f"); read -rp "Environment [$ENVIRONMENT]: " v; ENVIRONMENT=${v:-$ENVIRONMENT}; read -rp "Next Action [$NEXT_ACTION]: " v; NEXT_ACTION=${v:-$NEXT_ACTION}; read -rp "NOC Notes [$NOC_NOTES]: " v; NOC_NOTES=${v:-$NOC_NOTES}; local t; t=$(mktemp); jq --arg e "$ENVIRONMENT" --arg n "$NEXT_ACTION" --arg notes "$NOC_NOTES" '.noc.environment=$e|.noc.next_action=$n|.noc.notes=$notes' "$f">"$t"; jq -e . "$t">/dev/null; mv "$t" "$f"; printf '%s | %s | UPDATED_NOC\n' "$(now_log)" "$ID">>"$HISTORY"; echo "Updated $ID NOC fields"
+}
+close_ticket(){ local f dest reason; ID="$1"; f=$(file_for "$ID"); [[ -f "$f" ]]||die "$ID is not open"; read -rp "Closure/resolution note: " reason; dest=$(closed_file_for "$ID"); [[ ! -e "$dest" ]]||die "Closed record already exists"; local t; t=$(mktemp); jq --arg closed "$(now_iso)" --arg reason "${reason:-Closed}" '.metadata.closed=$closed|.metadata.closure_reason=$reason' "$f">"$t"; mv "$t" "$dest"; rm -f "$f"; printf '%s | %s | CLOSED\n' "$(now_log)" "$ID">>"$HISTORY"; echo "Closed $ID"
+}
+history(){ if [[ -n "${1:-}" ]]; then grep -F "| $1 |" "$HISTORY"||true; else cat "$HISTORY"; fi; }
+
+migrate(){
+ [[ -s "$LEGACY_OPEN" ]]||{ echo "No legacy open.tsv to migrate."; return; }; local backup="$ROOT/open.tsv.backup-$(date +%Y%m%d%H%M%S)"; cp "$LEGACY_OPEN" "$backup"; echo "Backup: $backup"; local id env summary status owner next created f tmp count=0
+ while IFS=$'\t' read -r id env summary status owner next created; do [[ -n "$id" ]]||continue; f=$(file_for "$id"); if [[ -e "$f" ]]; then warn "$id already exists; skipped"; continue; fi; ID="$id"; SUMMARY="$summary"; DESCRIPTION=""; STATUS="$status"; ASSIGNEE="$owner"; PRIORITY=""; ENVIRONMENT="$env"; NEXT_ACTION="$next"; NOC_NOTES=""; tmp=$(mktemp); write_record "$tmp" "${created:-$(now_iso)}" migrated-manual ""; mv "$tmp" "$f"; printf '%s | %s | MIGRATED | source=migrated-manual\n' "$(now_log)" "$id">>"$HISTORY"; count=$((count+1)); done < "$LEGACY_OPEN"
+ echo "Migrated $count legacy open ticket(s). Original preserved at $backup"
+}
+
+cmd="${1:-}"; case "$cmd" in add) [[ $# -eq 2 ]]||die "Usage: tix add ID"; add_ticket "$2";; list) list_tickets;; show) [[ $# -eq 2 ]]||die "Usage: tix show ID"; show_ticket "$2";; update) [[ $# -eq 2 ]]||die "Usage: tix update ID"; update_ticket "$2";; sync) [[ $# -eq 2 ]]||die "Usage: tix sync ID"; sync_ticket "$2";; close) [[ $# -eq 2 ]]||die "Usage: tix close ID"; close_ticket "$2";; history) history "${2:-}";; migrate) migrate;; help|-h|--help|"") usage;; *) die "Unknown command: $cmd";; esac

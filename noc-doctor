@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# noc-doctor - read-only health checks for the NOC automation stack
+# Usage: noc-doctor [--deep] [--date YYYY-MM-DD]
+set -uo pipefail
+
+NOC_ROOT="$HOME/noc"
+TIX_OPEN_DIR="$NOC_ROOT/tickets/open"
+DAY="$(date +%F)"
+DEEP=false
+PASS=0
+WARN=0
+FAIL=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --deep) DEEP=true ;;
+    --date) [ $# -ge 2 ] || { echo "ERROR: --date requires YYYY-MM-DD" >&2; exit 2; }; DAY="$2"; shift ;;
+    -h|--help) sed -n '2,3p' "$0"; exit 0 ;;
+    *) echo "ERROR: Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+date -d "$DAY" >/dev/null 2>&1 || { echo "ERROR: Invalid date: $DAY" >&2; exit 2; }
+SHIFT_DIR="$NOC_ROOT/$DAY"
+NOTES="$SHIFT_DIR/shift-notes.md"
+
+pass(){ PASS=$((PASS+1)); printf '  [OK]   %s\n' "$1"; }
+warn(){ WARN=$((WARN+1)); printf '  [WARN] %s\n' "$1"; }
+fail(){ FAIL=$((FAIL+1)); printf '  [FAIL] %s\n' "$1"; }
+
+printf '\nNOC DOCTOR - %s\n' "$(date -d "$DAY" +%m/%d/%Y)"
+printf '%s\n' '============================================================'
+printf 'Mode: %s\n' "$($DEEP && echo DEEP || echo STANDARD)"
+printf 'Read-only: yes\n'
+
+printf '\nTools\n'
+for cmd in bash jq atlas copilot tix noc-start noc-status noc-inv noc-handover; do
+  if command -v "$cmd" >/dev/null 2>&1; then pass "$cmd: $(command -v "$cmd")"; else fail "$cmd not found"; fi
+done
+
+printf '\nScript Syntax\n'
+for cmd in tix noc-start noc-status noc-inv noc-handover; do
+  path=$(command -v "$cmd" 2>/dev/null || true)
+  if [ -z "$path" ]; then warn "$cmd skipped; command missing"; continue; fi
+  if bash -n "$path" >/dev/null 2>&1; then pass "$cmd syntax valid"; else fail "$cmd syntax error: $path"; fi
+done
+
+printf '\nStorage\n'
+if [ -d "$NOC_ROOT" ]; then pass "$NOC_ROOT exists"; else fail "$NOC_ROOT missing"; fi
+if [ -d "$NOC_ROOT" ] && [ -w "$NOC_ROOT" ]; then pass "$NOC_ROOT is writable"; else fail "$NOC_ROOT is not writable"; fi
+if [ -d "$TIX_OPEN_DIR" ]; then pass "Ticket directory exists"; else warn "Ticket directory missing: $TIX_OPEN_DIR"; fi
+if [ -d "$SHIFT_DIR" ]; then pass "Shift directory exists: $SHIFT_DIR"; else warn "Shift directory missing: $SHIFT_DIR"; fi
+if [ -f "$NOTES" ]; then pass "Shift notes exist"; else warn "Shift notes missing: $NOTES"; fi
+
+printf '\nTicket JSON Integrity\n'
+if ! command -v jq >/dev/null 2>&1; then
+  fail "jq missing; cannot validate ticket records"
+elif [ ! -d "$TIX_OPEN_DIR" ]; then
+  warn "No open-ticket directory to validate"
+else
+  shopt -s nullglob
+  records=("$TIX_OPEN_DIR"/*.json)
+  shopt -u nullglob
+  if [ ${#records[@]} -eq 0 ]; then
+    pass "No open JSON ticket records"
+  else
+    for f in "${records[@]}"; do
+      name=$(basename "$f")
+      if ! jq -e . "$f" >/dev/null 2>&1; then fail "$name is invalid JSON"; continue; fi
+      if jq -e 'type=="object" and (.id|type=="string" and length>0) and (.jira|type=="object") and (.noc|type=="object") and (.metadata|type=="object")' "$f" >/dev/null 2>&1; then
+        pass "$name structure valid"
+      else
+        fail "$name missing required tix structure"
+      fi
+      id=$(jq -r '.id // ""' "$f")
+      stem=${name%.json}
+      if [ "$id" = "$stem" ]; then pass "$name ID matches filename"; else fail "$name ID mismatch: record=$id"; fi
+    done
+  fi
+fi
+
+printf '\nAtlas / Jira\n'
+if command -v atlas >/dev/null 2>&1; then
+  pass "Atlas executable available"
+  if $DEEP; then
+    # Atlas help/version is local/non-mutating. No Jira issue is queried because
+    # noc-doctor must not require or expose a production ticket ID.
+    if atlas --help >/dev/null 2>&1; then pass "Atlas CLI responds"; else fail "Atlas CLI did not respond to --help"; fi
+    warn "Jira authenticated read not executed; no ticket ID supplied to doctor"
+  else
+    warn "Jira connectivity not tested in standard mode; use Atlas/tix during normal workflow"
+  fi
+else
+  fail "Atlas unavailable"
+fi
+
+printf '\nCopilot\n'
+if command -v copilot >/dev/null 2>&1; then
+  pass "Copilot executable available"
+  warn "Copilot/Datadog MCP network call intentionally not executed"
+else
+  fail "Copilot unavailable"
+fi
+
+printf '\nOperational Safety\n'
+# Verify the key production scripts are not group/world writable.
+for cmd in tix noc-start noc-status noc-inv noc-handover; do
+  path=$(command -v "$cmd" 2>/dev/null || true)
+  [ -n "$path" ] || continue
+  perms=$(stat -c '%a' "$path" 2>/dev/null || echo unknown)
+  if [[ "$perms" =~ ^[0-7][0-5][0-5]$ ]]; then pass "$cmd permissions: $perms"; else warn "$cmd permissions are $perms; review group/world write access"; fi
+done
+
+printf '\nResult\n'
+printf '  Passed:   %d\n' "$PASS"
+printf '  Warnings: %d\n' "$WARN"
+printf '  Failed:   %d\n' "$FAIL"
+if [ "$FAIL" -gt 0 ]; then
+  printf '  Health:   UNHEALTHY\n\n'
+  exit 1
+elif [ "$WARN" -gt 0 ]; then
+  printf '  Health:   HEALTHY WITH WARNINGS\n\n'
+  exit 0
+else
+  printf '  Health:   HEALTHY\n\n'
+  exit 0
+fi

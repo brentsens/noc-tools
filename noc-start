@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# noc-start - start-of-shift setup for the SESami NOC WSL workstation
+# Usage: noc-start [--check-dd] [--no-copilot]
+set -uo pipefail
+
+# ---------- Settings (edit these) ----------
+NOC_ROOT="$HOME/noc"                       # where daily shift folders live
+M365_STATUS_CMD="m365 auth status"         # confirm with: m365 auth --help
+M365_LOGIN_CMD="m365 auth login"
+REQUIRED_TOOLS=(m365 copilot herdr)
+OPTIONAL_TOOLS=(kubectl wslview jq)
+export BROWSER="${BROWSER:-wslview}"       # lets WSL open your Windows browser
+
+CHECK_DD=false; START_COPILOT=true
+for arg in "$@"; do
+  case "$arg" in
+    --check-dd)   CHECK_DD=true ;;
+    --no-copilot) START_COPILOT=false ;;
+  esac
+done
+
+ok()   { printf '  \e[32m✔\e[0m %s\n' "$1"; }
+warn() { printf '  \e[33m!\e[0m %s\n' "$1"; }
+fail() { printf '  \e[31m✘\e[0m %s\n' "$1"; }
+
+# True only when 'm365 auth status' reports signed_in AND session_usable = true
+m365_signed_in() {
+  local s
+  s=$($M365_STATUS_CMD 2>/dev/null) || return 1
+  if command -v jq >/dev/null; then
+    echo "$s" | jq -e '.signed_in == true and .session_usable == true' >/dev/null 2>&1
+  else
+    echo "$s" | grep -Eq '"signed_in"[[:space:]]*:[[:space:]]*true' &&
+    echo "$s" | grep -Eq '"session_usable"[[:space:]]*:[[:space:]]*true'
+  fi
+}
+
+TODAY=$(date +%F)
+SHIFT_DIR="$NOC_ROOT/$TODAY"
+NOTES="$SHIFT_DIR/shift-notes.md"
+
+echo; echo "=== NOC START: $(date '+%a %b %d %Y %H:%M %Z') ==="
+
+# 1. Shift folder + notes template (runs FIRST so nothing below can skip it)
+echo; echo "[1] Shift workspace"
+for d in "$SHIFT_DIR" "$SHIFT_DIR/investigations" "$SHIFT_DIR/reports" "$SHIFT_DIR/handover"; do
+  if [ -d "$d" ]; then
+    ok "Exists, skipped: ${d#$NOC_ROOT/}"
+  else
+    mkdir -p "$d" || { fail "Could not create $d"; exit 1; }
+    ok "Created: ${d#$NOC_ROOT/}"
+  fi
+done
+if [ ! -s "$NOTES" ]; then            # missing OR empty -> write template (never overwrites your notes)
+  cat > "$NOTES" <<EOF
+# NOC Shift Notes - $TODAY
+
+## Open Tickets
+| Ticket | Environment | Summary | Status | Next Step |
+|--------|-------------|---------|--------|-----------|
+
+## Active Alerts / Investigations
+
+## Salesforce Tickets
+
+## Escalations
+
+## Changes / Monitor Updates
+
+## Notes for Handover
+EOF
+  ok "Created $NOTES"
+else
+  ok "Exists, skipped: shift-notes.md (your notes were not touched)"
+fi
+if [ "$(readlink "$NOC_ROOT/today" 2>/dev/null)" = "$SHIFT_DIR" ]; then
+  ok "Exists, skipped: ~/noc/today shortcut"
+else
+  ln -sfn "$SHIFT_DIR" "$NOC_ROOT/today"
+  ok "Shortcut: ~/noc/today -> $SHIFT_DIR"
+fi
+
+# 2. Tools
+echo; echo "[2] Tools"
+for t in "${REQUIRED_TOOLS[@]}"; do
+  command -v "$t" >/dev/null && ok "$t" || fail "$t not found"
+done
+for t in "${OPTIONAL_TOOLS[@]}"; do
+  command -v "$t" >/dev/null && ok "$t" || warn "$t not installed (optional)"
+done
+
+# 3. Microsoft 365 auth (never stops the script)
+echo; echo "[3] Microsoft 365"
+if ! command -v m365 >/dev/null; then
+  warn "Skipped - m365 not installed"
+elif m365_signed_in; then
+  ok "Already signed in - login skipped"
+else
+  warn "Not signed in (or session not usable) - starting login"
+  if $M365_LOGIN_CMD && m365_signed_in; then
+    ok "Signed in"
+  else
+    warn "M365 login failed - continuing; run '$M365_LOGIN_CMD' manually"
+  fi
+fi
+
+# 4. Kubernetes context (optional)
+echo; echo "[4] Kubernetes"
+if command -v kubectl >/dev/null; then
+  ctx=$(kubectl config current-context 2>/dev/null) && ok "Context: $ctx" || warn "No kube context set"
+else
+  warn "Skipped"
+fi
+
+# 5. Datadog check (optional - uses Copilot credits)
+echo; echo "[5] Datadog MCP"
+if $CHECK_DD && command -v copilot >/dev/null; then
+  copilot -p "Using the Datadog MCP tools only, list monitors currently in Alert state. Read-only. Do not change anything." \
+    > "$SHIFT_DIR/reports/alerting-monitors-start.md" 2>/dev/null \
+    && ok "Saved reports/alerting-monitors-start.md" \
+    || warn "Datadog check failed - run /ddconfig inside copilot"
+else
+  warn "Skipped (use --check-dd)"
+fi
+
+# 6. Open ticket summary
+echo
+echo "[6] Open Tickets"
+
+if command -v tix >/dev/null 2>&1; then
+  tix list
+else
+  warn "tix not found - open-ticket summary skipped"
+fi
+
+# 7. Launch
+echo; echo "=== Ready: $SHIFT_DIR ==="
+echo "Notes file: $NOTES"
+cd "$SHIFT_DIR" || exit 1
+if $START_COPILOT && command -v copilot >/dev/null; then
+  read -rp "Press Enter to open Copilot (Ctrl+C to stay in shell)... " _
+  exec copilot
+else
+  exec "$SHELL"
+fi
