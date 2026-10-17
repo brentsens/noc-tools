@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# install.sh - safely deploy tested NOC tools to ~/.local/bin
+
+set -euo pipefail
+
+INSTALL_DIR="$HOME/.local/bin"
+BACKUP_ROOT="$HOME/.local/share/noc-tools/backups"
+
+TOOLS=(
+  noc-start
+  noc-status
+  noc-doctor
+  noc-test
+  noc-inv
+  noc-handover
+  tix
+)
+
+ok() {
+  printf '  [OK] %s\n' "$1"
+}
+
+fail() {
+  printf '  [ERROR] %s\n' "$1" >&2
+  exit 1
+}
+
+echo
+echo "=== NOC TOOLS INSTALLER ==="
+echo
+
+# Must run from the Git repository.
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail "Run this from the noc-tools Git repository"
+
+# Refuse deployment from an uncommitted working tree.
+if ! git diff-index --quiet HEAD --; then
+  fail "Git working tree has uncommitted tracked changes"
+fi
+
+if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  fail "Git working tree contains untracked files"
+fi
+
+ok "Git working tree is clean"
+
+COMMIT=$(git rev-parse --short HEAD)
+BRANCH=$(git branch --show-current)
+
+echo "  Branch: $BRANCH"
+echo "  Commit: $COMMIT"
+
+echo
+echo "[1] Validating source files"
+
+for tool in "${TOOLS[@]}"; do
+  [ -f "$tool" ] || fail "Missing source file: $tool"
+
+  if bash -n "$tool"; then
+    ok "$tool"
+  else
+    fail "$tool failed Bash syntax validation"
+  fi
+done
+
+echo
+echo "[2] Running regression tests"
+
+if ./noc-test; then
+  ok "noc-test passed"
+else
+  fail "noc-test failed; nothing was deployed"
+fi
+
+echo
+echo "[3] Checking for deployment changes"
+
+CHANGED_TOOLS=()
+
+for tool in "${TOOLS[@]}"; do
+  if [ ! -f "$INSTALL_DIR/$tool" ]; then
+    CHANGED_TOOLS+=("$tool")
+    echo "  [NEW] $tool"
+  elif ! cmp -s "$tool" "$INSTALL_DIR/$tool"; then
+    CHANGED_TOOLS+=("$tool")
+    echo "  [CHANGED] $tool"
+  else
+    echo "  [UNCHANGED] $tool"
+  fi
+done
+
+if [ ${#CHANGED_TOOLS[@]} -eq 0 ]; then
+  echo
+  echo "No deployment required."
+  echo "Installed NOC tools already match commit $COMMIT."
+  exit 0
+fi
+
+echo
+echo "[3] Creating backup"
+
+STAMP=$(date '+%Y%m%d-%H%M%S')
+BACKUP_DIR="$BACKUP_ROOT/$STAMP-$COMMIT"
+
+mkdir -p "$BACKUP_DIR"
+
+for tool in "${CHANGED_TOOLS[@]}"; do
+  if [ -f "$INSTALL_DIR/$tool" ]; then
+    cp -p "$INSTALL_DIR/$tool" "$BACKUP_DIR/$tool"
+  fi
+done
+
+ok "Backup: $BACKUP_DIR"
+
+echo
+echo "[4] Installing"
+
+mkdir -p "$INSTALL_DIR"
+
+for tool in "${TOOLS[@]}"; do
+  TEMP="$INSTALL_DIR/.${tool}.install.$$"
+
+  cp "$tool" "$TEMP"
+  chmod 755 "$TEMP"
+
+  # Validate the exact file about to become live.
+  bash -n "$TEMP" || {
+    rm -f "$TEMP"
+    fail "Installed copy of $tool failed validation"
+  }
+
+  mv "$TEMP" "$INSTALL_DIR/$tool"
+  ok "$tool"
+done
+
+echo
+echo "[5] Validating installed stack"
+
+if "$INSTALL_DIR/noc-doctor" --deep; then
+  ok "noc-doctor passed"
+else
+  echo
+  echo "[ERROR] Installed stack failed noc-doctor."
+  echo "Backup is available at:"
+  echo "  $BACKUP_DIR"
+  exit 1
+fi
+
+echo
+echo "============================================================"
+echo "NOC tools deployed successfully."
+echo
+echo "Branch: $BRANCH"
+echo "Commit: $COMMIT"
+echo "Backup: $BACKUP_DIR"
+echo "Install: $INSTALL_DIR"
+echo "============================================================"
+``
