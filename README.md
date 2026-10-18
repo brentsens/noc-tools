@@ -1251,16 +1251,199 @@ Operational NOC records must remain outside the repository.
 
 ---
 
-# 24. Quick command reference
+# 24. Command arguments and quick reference
 
-## Start of shift
+This section lists the supported arguments/subcommands for the NOC tools in this repository.
+
+## `noc-start`
+
+```bash
+noc-start
+```
+
+Current workflow uses `noc-start` without additional arguments.
+
+## `noc-status`
+
+```bash
+noc-status [--yesterday | --date YYYY-MM-DD]
+```
+
+| Argument | Purpose |
+|---|---|
+| *(none)* | Show the current/default shift status. Before the configured early-morning cutoff, the tool can select the previous shift date automatically. |
+| `--yesterday` | Show status for the previous calendar day's shift. |
+| `--date YYYY-MM-DD` | Show status for a specific shift date. |
+| `-h`, `--help` | Show usage information. |
+
+Examples:
+
+```bash
+noc-status
+noc-status --yesterday
+noc-status --date 2026-10-16
+```
+
+## `noc-doctor`
+
+```bash
+noc-doctor [--deep] [--date YYYY-MM-DD]
+```
+
+| Argument | Purpose |
+|---|---|
+| *(none)* | Run the standard read-only automation health checks. |
+| `--deep` | Add deeper local CLI checks such as Atlas CLI responsiveness. It still intentionally avoids a live production Jira-ticket read and Datadog MCP query. |
+| `--date YYYY-MM-DD` | Check the storage/shift paths for a specific date. |
+| `-h`, `--help` | Show usage information. |
+
+Examples:
+
+```bash
+noc-doctor
+noc-doctor --deep
+noc-doctor --deep --date 2026-10-16
+```
+
+## `noc-test`
+
+```bash
+noc-test [--keep]
+```
+
+| Argument | Purpose |
+|---|---|
+| *(none)* | Run the isolated regression suite and remove the temporary test lab afterward. |
+| `--keep` | Preserve the temporary synthetic test workspace so failed-test artifacts can be inspected. |
+| `-h`, `--help` | Show usage information. |
+
+Examples:
+
+```bash
+noc-test
+noc-test --keep
+```
+
+## `noc-inv`
+
+```bash
+noc-inv
+noc-inv INVESTIGATION_NAME DATADOG_NOTEBOOK_URL
+noc-inv --open INVESTIGATION_NAME
+```
+
+| Argument / mode | Purpose |
+|---|---|
+| *(none)* | Interactive mode. Prompts for the investigation name and final Datadog Notebook URL. |
+| `INVESTIGATION_NAME DATADOG_NOTEBOOK_URL` | Create/capture the named investigation from the supplied final Datadog Notebook URL. |
+| `--open INVESTIGATION_NAME` | Reopen the existing local `investigation.md` for the named investigation. |
+| `-h`, `--help` | Show usage information when supported by the installed version. |
+
+`noc-inv` is only for finalized Datadog monitor/incident investigations. It is not the general Jira-ticket workflow.
+
+## `noc-handover`
+
+```bash
+noc-handover [--dd] [--send-self] [--force] [--yesterday | --date YYYY-MM-DD]
+```
+
+| Argument | Purpose |
+|---|---|
+| *(none)* | Generate the handover for the default/current shift date. Existing handovers are protected. |
+| `--dd` | Add the read-only Datadog MCP shift-activity lookup. |
+| `--send-self` | Open the interactive Copilot/M365 send-to-self flow for the generated handover. The workflow remains limited to the configured user email. |
+| `--force` | Intentionally regenerate/overwrite the handover for the selected date. Use only after review. |
+| `--yesterday` | Use the previous calendar day's shift. |
+| `--date YYYY-MM-DD` | Generate/use the handover for a specific shift date. |
+| `-h`, `--help` | Show usage information. |
+
+Arguments can be combined where appropriate, for example:
+
+```bash
+noc-handover --dd
+noc-handover --yesterday
+noc-handover --force --yesterday
+noc-handover --date 2026-10-16 --dd
+noc-handover --send-self
+```
+
+## `tix`
+
+```bash
+tix COMMAND [ARGUMENTS]
+```
+
+| Command | Arguments | Purpose |
+|---|---|---|
+| `add` | `TICKET_ID` | Add a Jira-style ticket. Atlas is attempted first; manual fallback is offered if retrieval fails. |
+| `list` | none | List locally tracked open JSON tickets. |
+| `show` | `TICKET_ID` | Show the full local JSON record for one open ticket. |
+| `update` | `TICKET_ID` | Update only the NOC-managed Environment, Next Action, and NOC Notes fields. |
+| `sync` | `TICKET_ID` | Retrieve current Jira-managed fields through Atlas, preview differences, and apply them only after approval. |
+| `history` | `[TICKET_ID]` | Show all `tix` history, or filter history to one ticket when an ID is supplied. |
+| `close` | `TICKET_ID` | Move a locally tracked open ticket to closed after an explicit NOC closure decision. |
+| `migrate` | none | Migrate legacy `open.tsv` records into JSON while retaining a timestamped backup of the legacy file. |
+| `help`, `-h`, `--help` | none | Show `tix` usage. |
+
+Examples:
+
+```bash
+tix add NOC-580
+tix list
+tix show NOC-580
+tix update NOC-580
+tix sync NOC-580
+tix history
+tix history NOC-580
+tix close NOC-580
+tix migrate
+```
+
+> `tix sync --all` is **not currently implemented**. Use explicit single-ticket synchronization: `tix sync NOC-###`.
+
+## `noc-install`
+
+```bash
+./noc-install
+```
+
+Current installer is intentionally argument-free. It validates a clean Git tree, runs syntax checks and `noc-test`, detects changed tools, backs up changed live versions, deploys changed tools only, and runs `noc-doctor --deep` afterward.
+
+Run it from the `~/code/noc-tools` Git repository after committing the intended script changes.
+
+## `noc-rollback`
+
+```bash
+./noc-rollback [--list | latest | BACKUP_DIRECTORY]
+```
+
+| Argument | Purpose |
+|---|---|
+| `--list`, `-l` | List available installer backup directories. |
+| `latest` | Preview and, after confirmation, restore from the newest installer backup. |
+| `BACKUP_DIRECTORY` | Preview and, after confirmation, restore from a specific backup directory. |
+| *(none)* | Uses the newest available backup, equivalent to the current `latest` behavior. |
+
+Examples:
+
+```bash
+./noc-rollback --list
+./noc-rollback latest
+./noc-rollback "$HOME/.local/share/noc-tools/backups/20261017-120000-abcdef0"
+```
+
+---
+
+## Quick command reference
+
+### Start of shift
 
 ```bash
 noc-start
 noc-status
 ```
 
-## Ticket operations
+### Ticket operations
 
 ```bash
 tix add NOC-###
@@ -1272,29 +1455,34 @@ tix history NOC-###
 tix close NOC-###
 ```
 
-## Investigation
+### Investigation
 
 ```bash
 noc-inv
+noc-inv investigation-name "DATADOG-NOTEBOOK-URL"
+noc-inv --open investigation-name
 ```
 
-## Health/status
+### Health/status/testing
 
 ```bash
 noc-status
+noc-status --yesterday
 noc-doctor --deep
 noc-test
 ```
 
-## Handover
+### Handover
 
 ```bash
 noc-handover
 noc-handover --dd
 noc-handover --yesterday
+noc-handover --force --yesterday
+noc-handover --send-self
 ```
 
-## Source change/deploy
+### Source change/deploy
 
 ```bash
 cd ~/code/noc-tools
@@ -1307,7 +1495,7 @@ git push
 noc-doctor --deep
 ```
 
-## Rollback
+### Rollback
 
 ```bash
 ./noc-rollback --list
