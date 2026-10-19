@@ -6,14 +6,17 @@ set -euo pipefail
 INSTALL_DIR="$HOME/.local/bin"
 BACKUP_ROOT="$HOME/.local/share/noc-tools/backups"
 
-TOOLS=(
-  noc-start
-  noc-status
-  noc-doctor
-  noc-test
-  noc-inv
-  noc-handover
-  tix
+mapfile -t TOOLS < <(
+  while IFS= read -r -d '' file; do
+    [[ "$file" != */* ]] || continue
+    [[ "$file" == "noc-install" || "$file" == "noc-test" ]] && continue
+    [[ -f "$file" && -x "$file" ]] || continue
+
+    IFS= read -r first_line < "$file" || continue
+    [[ "$first_line" == *bash* ]] || continue
+
+    printf '%s\n' "$file"
+  done < <(git ls-files -z)
 )
 
 ok() {
