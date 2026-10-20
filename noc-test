@@ -171,7 +171,77 @@ else
   assert_eq "$after" "$before" "existing handover was not overwritten"
 fi
 
-printf '\n10. noc-inv Invalid URL Rejection\n'
+printf '\n10. noc-handover Confluence Documentation Carry-Through\n'
+
+if [[ -z "${PROD[noc-handover]}" ]]; then
+  skip "noc-handover not installed"
+else
+  TEST_DAY="2026-10-19"
+  TEST_SHIFT="$HOME/noc/$TEST_DAY"
+  TEST_HANDOVER="$TEST_SHIFT/handover/handover-$TEST_DAY.md"
+
+  mkdir -p "$TEST_SHIFT/handover"
+
+  cat > "$TEST_SHIFT/shift-notes.md" <<'NOTES'
+# NOC Shift Notes - 2026-10-19
+
+## Notes for Handover
+- Created the NOC Workflow Confluence page: [Datadog Bits AI Copilot Agent NOC Operations Guide](https://example.invalid/wiki/NOC-TEST-PAGE).
+NOTES
+
+  cat > "$MOCK_STATE/copilot-output" <<'HANDOVER'
+Hi Team,
+
+Please see the handover for the 4:00 PM - 12:00 AM shift.
+
+## Summary
+No material operational issues were recorded in the synthetic shift.
+
+## Documentation Updates
+- Created the **Datadog Bits AI Copilot Agent NOC Operations Guide** for the NOC workflow: https://example.invalid/wiki/NOC-TEST-PAGE
+
+## Open Salesforce Tickets
+No open Salesforce tickets.
+
+## Open Jira Tickets
+No open Jira tickets.
+
+## Next Shift Actions
+- None.
+
+Please tag me if any clarification is needed.
+HANDOVER
+
+  rm -f "$TEST_HANDOVER"
+
+  if noc-handover --date "$TEST_DAY" >"$LAB/handover-confluence.out" 2>&1; then
+    pass "Confluence handover generation completed"
+  else
+    fail "Confluence handover generation failed"
+  fi
+
+  if grep -Fq "## Documentation Updates" "$TEST_HANDOVER"; then
+    pass "Documentation Updates section preserved"
+  else
+    fail "Documentation Updates section missing"
+  fi
+
+  if grep -Fq "Datadog Bits AI Copilot Agent NOC Operations Guide" "$TEST_HANDOVER"; then
+    pass "Confluence page title preserved"
+  else
+    fail "Confluence page title missing"
+  fi
+
+  if grep -Fq "https://example.invalid/wiki/NOC-TEST-PAGE" "$TEST_HANDOVER"; then
+    pass "Confluence URL preserved"
+  else
+    fail "Confluence URL missing"
+  fi
+
+  rm -f "$MOCK_STATE/copilot-output"
+fi
+
+printf '\n11. noc-inv Invalid URL Rejection\n'
 if [[ -z "${PROD[noc-inv]}" ]]; then
   skip "noc-inv not installed"
 else
