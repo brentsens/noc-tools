@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tix - local NOC ticket tracker with Atlas/Jira-backed add and manual fallback - test
+# tix - local NOC ticket tracker with Atlas/Jira-backed add and manual fallback
 set -euo pipefail
 ROOT="${TIX_ROOT:-$HOME/noc/tickets}"
 OPEN_DIR="$ROOT/open"; CLOSED_DIR="$ROOT/closed"; HISTORY="$ROOT/history.log"
