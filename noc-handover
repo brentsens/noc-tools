@@ -134,6 +134,16 @@ TICKET RULES
 - Put SDP-* tickets under Open DevOps Tickets when present.
 - If no JSON ticket records are supplied, use shift notes and the previous handover only as fallback context and do not invent an open-ticket list.
 
+DOCUMENTATION RULES
+
+- Review the "Notes for Handover" section of shift-notes.md.
+- If a Confluence page was explicitly created during the current shift, include it in the handover.
+- Preserve the Confluence page title and original URL exactly.
+- Summarize why the page was created in one concise sentence.
+- Do not copy the full Confluence page content.
+- Do not include Confluence pages that were only viewed, referenced, or updated.
+- Do not invent, shorten, reconstruct, or modify a Confluence URL.
+
 INVESTIGATION RULES
 - FINAL REVIEWED INVESTIGATIONS contains local noc-inv records created from the final updated Datadog Notebook.
 - Treat those reviewed records as the primary source for investigation findings when present.
@@ -173,6 +183,12 @@ If there were no material operational events, simply state that the shift was qu
 
 ## Monitoring / Alert Update
 Use a short subsection or bullets for each alert or issue. Omit if none.
+
+## Documentation Updates
+Include Confluence pages explicitly recorded as created during the current shift under "Notes for Handover".
+Preserve the original page title and URL exactly.
+Keep each entry concise.
+Omit this section if no new Confluence page was created during the shift.
 
 ## Investigation Updates
 Summarize each relevant reviewed investigation. Omit if none.
