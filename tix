@@ -16,6 +16,7 @@ Usage:
   tix show TICKET_ID
   tix update TICKET_ID
   tix sync TICKET_ID
+  tix sync --all
   tix history [TICKET_ID]
   tix close TICKET_ID
   tix migrate
@@ -72,6 +73,321 @@ add_ticket(){
  read_noc; local created; created=$(now_iso); write_record "$tmp" "$created" "$SOURCE" "$LAST_SYNC"; review; read -rp "Save ticket? [y/N]: " choice; [[ "$choice" =~ ^[Yy]$ ]]||{ echo "Canceled. Nothing saved."; return; }; [[ ! -e "$DEST" ]]||die "$ID appeared while adding"; mv "$tmp" "$DEST"; printf '%s | %s | ADDED | source=%s\n' "$(now_log)" "$ID" "$SOURCE" >> "$HISTORY"; echo "Added $ID"; echo "Saved: $DEST"
 }
 
+fetch_jira_ticket() {
+  local id="$1"
+  local output_file="$2"
+
+  atlas jira get "$id" > "$output_file"
+}
+
+jira_fields_changed() {
+  local local_file="$1"
+  local jira_json="$2"
+
+  local old_summary old_description old_status old_assignee old_priority
+  local new_summary new_description new_status new_assignee new_priority
+
+  old_summary=$(jq -r '.jira.summary // ""' "$local_file")
+  old_description=$(jq -r '.jira.description // ""' "$local_file")
+  old_status=$(jq -r '.jira.status // ""' "$local_file")
+  old_assignee=$(jq -r '.jira.assignee // ""' "$local_file")
+  old_priority=$(jq -r '.jira.priority // ""' "$local_file")
+
+  new_summary=$(jq -r '.summary // ""' <<<"$jira_json")
+  new_description=$(jq -r '.description // ""' <<<"$jira_json")
+  new_status=$(jq -r '.status // ""' <<<"$jira_json")
+  new_assignee=$(jq -r '.assignee // ""' <<<"$jira_json")
+  new_priority=$(jq -r '.priority // ""' <<<"$jira_json")
+
+  [[ "$old_summary" != "$new_summary" ||
+     "$old_description" != "$new_description" ||
+     "$old_status" != "$new_status" ||
+     "$old_assignee" != "$new_assignee" ||
+     "$old_priority" != "$new_priority" ]]
+}
+
+preview_jira_changes() {
+  local id="$1"
+  local local_file="$2"
+  local jira_json="$3"
+
+  local old_summary old_description old_status old_assignee old_priority
+  local new_summary new_description new_status new_assignee new_priority
+  local environment next_action noc_notes
+
+  old_summary=$(jq -r '.jira.summary // ""' "$local_file")
+  old_description=$(jq -r '.jira.description // ""' "$local_file")
+  old_status=$(jq -r '.jira.status // ""' "$local_file")
+  old_assignee=$(jq -r '.jira.assignee // ""' "$local_file")
+  old_priority=$(jq -r '.jira.priority // ""' "$local_file")
+
+  new_summary=$(jq -r '.summary // ""' <<<"$jira_json")
+  new_description=$(jq -r '.description // ""' <<<"$jira_json")
+  new_status=$(jq -r '.status // ""' <<<"$jira_json")
+  new_assignee=$(jq -r '.assignee // ""' <<<"$jira_json")
+  new_priority=$(jq -r '.priority // ""' <<<"$jira_json")
+
+  environment=$(jq -r '.noc.environment // ""' "$local_file")
+  next_action=$(jq -r '.noc.next_action // ""' "$local_file")
+  noc_notes=$(jq -r '.noc.notes // ""' "$local_file")
+
+  echo
+  echo "JIRA CHANGE PREVIEW - $id"
+  echo
+
+  printf '%-13s | %-30s | %s\n' "FIELD" "LOCAL" "JIRA"
+  printf '%s\n' "------------------------------------------------------------------------------------------"
+
+  if [[ "$old_summary" != "$new_summary" ]]; then
+    printf '%-13s | %-30.30s | %.60s\n' \
+      "Summary" "$old_summary" "$new_summary"
+  fi
+
+  if [[ "$old_description" != "$new_description" ]]; then
+    printf '%-13s | %-30.30s | %.60s\n' \
+      "Description" "$old_description" "$new_description"
+  fi
+
+  if [[ "$old_status" != "$new_status" ]]; then
+    printf '%-13s | %-30.30s | %.60s\n' \
+      "Status" "$old_status" "$new_status"
+  fi
+
+  if [[ "$old_assignee" != "$new_assignee" ]]; then
+    printf '%-13s | %-30.30s | %.60s\n' \
+      "Assignee" "$old_assignee" "$new_assignee"
+  fi
+
+  if [[ "$old_priority" != "$new_priority" ]]; then
+    printf '%-13s | %-30.30s | %.60s\n' \
+      "Priority" "$old_priority" "$new_priority"
+  fi
+
+  echo
+  echo "NOC FIELDS - PRESERVED"
+  printf '  Environment: %s\n' "${environment:-[not provided]}"
+  printf '  Next Action: %s\n' "${next_action:-[not provided]}"
+  printf '  NOC Notes:   %s\n' "${noc_notes:-[none]}"
+}
+
+apply_jira_update() {
+  local id="$1"
+  local local_file="$2"
+  local jira_json="$3"
+
+  local tmp sync_time
+  local old_summary old_description old_status old_assignee old_priority
+  local new_summary new_description new_status new_assignee new_priority
+
+  tmp=$(mktemp)
+
+  old_summary=$(jq -r '.jira.summary // ""' "$local_file")
+  old_description=$(jq -r '.jira.description // ""' "$local_file")
+  old_status=$(jq -r '.jira.status // ""' "$local_file")
+  old_assignee=$(jq -r '.jira.assignee // ""' "$local_file")
+  old_priority=$(jq -r '.jira.priority // ""' "$local_file")
+
+  new_summary=$(jq -r '.summary // ""' <<<"$jira_json")
+  new_description=$(jq -r '.description // ""' <<<"$jira_json")
+  new_status=$(jq -r '.status // ""' <<<"$jira_json")
+  new_assignee=$(jq -r '.assignee // ""' <<<"$jira_json")
+  new_priority=$(jq -r '.priority // ""' <<<"$jira_json")
+
+  sync_time=$(now_iso)
+
+  jq \
+    --arg summary "$new_summary" \
+    --arg description "$new_description" \
+    --arg status "$new_status" \
+    --arg assignee "$new_assignee" \
+    --arg priority "$new_priority" \
+    --arg synced "$sync_time" \
+    '
+      .jira.summary=$summary |
+      .jira.description=$description |
+      .jira.status=$status |
+      .jira.assignee=$assignee |
+      .jira.priority=$priority |
+      .metadata.source="atlas" |
+      .metadata.last_synced=$synced
+    ' "$local_file" > "$tmp"
+
+  jq -e . "$tmp" >/dev/null || {
+    rm -f "$tmp"
+    warn "Updated record failed JSON validation: $id"
+    return 1
+  }
+
+  [[ "$(jq -r '.id' "$tmp")" == "$id" ]] || {
+    rm -f "$tmp"
+    warn "Updated record ID mismatch: $id"
+    return 1
+  }
+
+  mv "$tmp" "$local_file"
+
+  printf '%s | %s | SYNC | source=atlas\n' \
+    "$(now_log)" "$id" >> "$HISTORY"
+
+  [[ "$old_summary" == "$new_summary" ]] ||
+    printf '%s | %s | SYNC_CHANGE | summary updated\n' \
+      "$(now_log)" "$id" >> "$HISTORY"
+
+  [[ "$old_description" == "$new_description" ]] ||
+    printf '%s | %s | SYNC_CHANGE | description updated\n' \
+      "$(now_log)" "$id" >> "$HISTORY"
+
+  [[ "$old_status" == "$new_status" ]] ||
+    printf '%s | %s | SYNC_CHANGE | status: %s -> %s\n' \
+      "$(now_log)" "$id" "$old_status" "$new_status" >> "$HISTORY"
+
+  [[ "$old_assignee" == "$new_assignee" ]] ||
+    printf '%s | %s | SYNC_CHANGE | assignee: %s -> %s\n' \
+      "$(now_log)" "$id" "$old_assignee" "$new_assignee" >> "$HISTORY"
+
+  [[ "$old_priority" == "$new_priority" ]] ||
+    printf '%s | %s | SYNC_CHANGE | priority: %s -> %s\n' \
+      "$(now_log)" "$id" "$old_priority" "$new_priority" >> "$HISTORY"
+
+  return 0
+}
+
+discover_open_tickets() {
+  local f id filename
+  local found=0
+
+  shopt -s nullglob
+  local files=("$OPEN_DIR"/*.json)
+  shopt -u nullglob
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo "No open tickets found."
+    return 0
+  fi
+
+  for f in "${files[@]}"; do
+    filename=$(basename "$f" .json)
+
+    # Validate JSON
+    if ! jq -e . "$f" >/dev/null 2>&1; then
+      warn "Invalid ticket JSON: $f"
+      continue
+    fi
+
+    # Validate required structure
+    if ! jq -e '
+      type == "object" and
+      (.id | type == "string" and length > 0) and
+      (.jira | type == "object") and
+      (.noc | type == "object") and
+      (.metadata | type == "object")
+    ' "$f" >/dev/null 2>&1; then
+      warn "Invalid tix record structure: $f"
+      continue
+    fi
+
+    id=$(jq -r '.id' "$f")
+
+    # File name and record ID must agree
+    if [[ "$id" != "$filename" ]]; then
+      warn "Ticket ID mismatch: file=$filename record=$id"
+      continue
+    fi
+
+    printf '%s\n' "$id"
+    found=$((found + 1))
+  done
+
+  if [[ $found -eq 0 ]]; then
+    warn "No valid open ticket records found."
+  fi
+}
+
+sync_all_check() {
+  command -v atlas >/dev/null 2>&1 || die "atlas is required for sync"
+
+  local id f td atlas_json parsed rc
+  local total=0 changed=0 unchanged=0 failed=0
+
+  mapfile -t ticket_ids < <(discover_open_tickets)
+
+  if [[ ${#ticket_ids[@]} -eq 0 ]]; then
+    echo "No valid open tickets to check."
+    return 0
+  fi
+
+  echo
+  echo "JIRA SYNC CHECK"
+  echo
+
+  for id in "${ticket_ids[@]}"; do
+    total=$((total + 1))
+    f=$(file_for "$id")
+
+    td=$(mktemp -d)
+    atlas_json="$td/atlas.json"
+
+    set +e
+    fetch_jira_ticket "$id" "$atlas_json"
+    rc=$?
+    set -e
+
+    if [[ $rc -ne 0 ]]; then
+      printf '  %-12s FAILED - %s\n' "$id" "$(atlas_failure_text "$rc")"
+      failed=$((failed + 1))
+      rm -rf "$td"
+      continue
+    fi
+
+    set +e
+    parsed=$(parse_atlas "$id" "$atlas_json")
+    rc=$?
+    set -e
+
+    if [[ $rc -ne 0 || -z "$parsed" ]]; then
+      printf '  %-12s FAILED - invalid/unexpected Jira response\n' "$id"
+      failed=$((failed + 1))
+      rm -rf "$td"
+      continue
+    fi
+
+    if jira_fields_changed "$f" "$parsed"; then
+      printf '  %-12s CHANGED\n' "$id"
+      changed=$((changed + 1))
+
+      preview_jira_changes "$id" "$f" "$parsed"
+
+      echo
+      read -rp "Apply Jira changes to $id? [y/N]: " choice
+
+      if [[ "$choice" =~ ^[Yy]$ ]]; then
+        if apply_jira_update "$id" "$f" "$parsed"; then
+          echo "  Applied Jira changes to $id."
+        else
+          warn "Failed to apply Jira changes to $id."
+          failed=$((failed + 1))
+        fi
+      else
+        echo "  Skipped $id. Existing record was not changed."
+      fi
+    else
+      printf '  %-12s UNCHANGED\n' "$id"
+      unchanged=$((unchanged + 1))
+    fi
+
+    rm -rf "$td"
+  done
+
+  echo
+  echo "Summary"
+  printf '  Checked:   %d\n' "$total"
+  printf '  Changed:   %d\n' "$changed"
+  printf '  Unchanged: %d\n' "$unchanged"
+  printf '  Failed:    %d\n' "$failed"
+  echo
+  echo "Bulk Jira sync review complete."
+  echo "Only individually approved Jira-managed fields were updated."
+}
 
 sync_ticket(){
   ID="$1"
@@ -87,7 +403,7 @@ sync_ticket(){
 
   echo "Fetching $ID from Jira with Atlas..."
   set +e
-  atlas jira get "$ID" > "$atlas_json"
+  fetch_jira_ticket "$ID" "$atlas_json"
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
@@ -200,4 +516,56 @@ migrate(){
  echo "Migrated $count legacy open ticket(s). Original preserved at $backup"
 }
 
-cmd="${1:-}"; case "$cmd" in add) [[ $# -eq 2 ]]||die "Usage: tix add ID"; add_ticket "$2";; list) list_tickets;; show) [[ $# -eq 2 ]]||die "Usage: tix show ID"; show_ticket "$2";; update) [[ $# -eq 2 ]]||die "Usage: tix update ID"; update_ticket "$2";; sync) [[ $# -eq 2 ]]||die "Usage: tix sync ID"; sync_ticket "$2";; close) [[ $# -eq 2 ]]||die "Usage: tix close ID"; close_ticket "$2";; history) history "${2:-}";; migrate) migrate;; help|-h|--help|"") usage;; *) die "Unknown command: $cmd";; esac
+cmd="${1:-}"
+
+case "$cmd" in
+  add)
+    [[ $# -eq 2 ]] || die "Usage: tix add ID"
+    add_ticket "$2"
+    ;;
+
+  list)
+    list_tickets
+    ;;
+
+  show)
+    [[ $# -eq 2 ]] || die "Usage: tix show ID"
+    show_ticket "$2"
+    ;;
+
+  update)
+    [[ $# -eq 2 ]] || die "Usage: tix update ID"
+    update_ticket "$2"
+    ;;
+
+  sync)
+    [[ $# -eq 2 ]] || die "Usage: tix sync TICKET_ID|--all"
+
+    if [[ "$2" == "--all" ]]; then
+      sync_all_check
+    else
+      sync_ticket "$2"
+    fi
+    ;;
+
+  close)
+    [[ $# -eq 2 ]] || die "Usage: tix close ID"
+    close_ticket "$2"
+    ;;
+
+  history)
+    history "${2:-}"
+    ;;
+
+  migrate)
+    migrate
+    ;;
+
+  help|-h|--help|"")
+    usage
+    ;;
+
+  *)
+    die "Unknown command: $cmd"
+    ;;
+esac

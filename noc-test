@@ -24,8 +24,16 @@ for req in bash jq sha256sum mktemp; do
 done
 
 # Capture production command paths before replacing HOME/PATH.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 declare -A PROD
-for cmd in tix noc-start noc-status noc-inv noc-handover; do PROD[$cmd]=$(command -v "$cmd" 2>/dev/null || true); done
+
+for cmd in tix noc-start noc-status noc-inv noc-handover; do
+  if [[ -x "$SCRIPT_DIR/$cmd" ]]; then
+    PROD[$cmd]="$SCRIPT_DIR/$cmd"
+  else
+    PROD[$cmd]=$(command -v "$cmd" 2>/dev/null || true)
+  fi
+done
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/noc-test.XXXXXX")
 TEST_HOME="$LAB/home"
@@ -42,13 +50,41 @@ done
 # Safe mocks. Atlas mode and response are controlled by files inside the lab.
 cat > "$MOCK_BIN/atlas" <<'MOCK'
 #!/usr/bin/env bash
-mode=$(cat "${MOCK_STATE:?}/atlas-mode" 2>/dev/null || echo success)
-if [[ "${1:-}" == "--help" ]]; then echo 'mock atlas'; exit 0; fi
-if [[ "$mode" == "authfail" ]]; then exit 4; fi
-if [[ "$mode" == "servicefail" ]]; then exit 5; fi
-if [[ "$mode" == "notfound" ]]; then exit 6; fi
-cat "${MOCK_STATE:?}/atlas-response.json"
+
+if [[ "${1:-}" == "--help" ]]; then
+  echo "mock atlas"
+  exit 0
+fi
+
+requested_id="${@: -1}"
+
+ticket_mode_file="${MOCK_STATE:?}/atlas-mode-${requested_id}"
+default_mode_file="${MOCK_STATE:?}/atlas-mode"
+
+if [[ -f "$ticket_mode_file" ]]; then
+  mode=$(cat "$ticket_mode_file")
+else
+  mode=$(cat "$default_mode_file" 2>/dev/null || echo success)
+fi
+
+case "$mode" in
+  authfail)    exit 4 ;;
+  servicefail) exit 5 ;;
+  notfound)    exit 6 ;;
+esac
+
+ticket_response="${MOCK_STATE:?}/atlas-${requested_id}.json"
+default_response="${MOCK_STATE:?}/atlas-response.json"
+
+if [[ -f "$ticket_response" ]]; then
+  cat "$ticket_response"
+elif [[ -f "$default_response" ]]; then
+  cat "$default_response"
+else
+  exit 6
+fi
 MOCK
+
 chmod +x "$MOCK_BIN/atlas"
 
 cat > "$MOCK_BIN/copilot" <<'MOCK'
@@ -62,6 +98,49 @@ export HOME="$TEST_HOME"
 export MOCK_STATE="$LAB/state"
 export PATH="$MOCK_BIN:/usr/bin:/bin"
 mkdir -p "$MOCK_STATE"
+
+create_test_ticket() {
+  local root="$1"
+  local id="$2"
+  local summary="$3"
+  local status="$4"
+  local assignee="$5"
+  local environment="$6"
+  local next_action="$7"
+  local notes="$8"
+
+  mkdir -p "$root/open" "$root/closed"
+
+  jq -n \
+    --arg id "$id" \
+    --arg summary "$summary" \
+    --arg status "$status" \
+    --arg assignee "$assignee" \
+    --arg environment "$environment" \
+    --arg next_action "$next_action" \
+    --arg notes "$notes" \
+    '{
+      id: $id,
+      jira: {
+        summary: $summary,
+        description: "Synthetic description",
+        status: $status,
+        assignee: $assignee,
+        priority: "Medium"
+      },
+      noc: {
+        environment: $environment,
+        next_action: $next_action,
+        notes: $notes
+      },
+      metadata: {
+        source: "atlas",
+        created: "2026-10-20T16:00:00-05:00",
+        last_synced: "2026-10-20T16:00:00-05:00"
+      }
+    }' > "$root/open/$id.json"
+}
+
 printf 'success\n' > "$MOCK_STATE/atlas-mode"
 
 printf '\nNOC TEST - ISOLATED LAB\n'
@@ -140,13 +219,280 @@ JSON
   printf '\n7. tix Atlas Failure Preservation\n'
   before=$(sha256sum "$rec2" | awk '{print $1}')
   printf 'servicefail\n' > "$MOCK_STATE/atlas-mode"
-  if tix sync NOC-9002 >"$LAB/sync-fail.out" 2>&1; then fail "failed Atlas sync unexpectedly returned success"; else pass "Atlas failure reported"; fi
+
+  if tix sync NOC-9002 >"$LAB/sync-fail.out" 2>&1; then 
+    fail "failed Atlas sync unexpectedly returned success"; 
+  else 
+    pass "Atlas failure reported"; 
+  fi
   after=$(sha256sum "$rec2" | awk '{print $1}')
-  assert_eq "$after" "$before" "Atlas failure preserved existing record"
+
+  assert_eq "$after" "$before" \
+  "Atlas failure preserved existing record"
+
   printf 'success\n' > "$MOCK_STATE/atlas-mode"
+
+
+printf '\n8. tix Bulk Sync - All Unchanged\n'
+
+BULK_ROOT="$LAB/bulk-tickets"
+rm -rf "$BULK_ROOT"
+mkdir -p "$BULK_ROOT/open" "$BULK_ROOT/closed"
+
+create_test_ticket \
+  "$BULK_ROOT" \
+  "NOC-9101" \
+  "Synthetic issue one" \
+  "Escalated" \
+  "Engineer One" \
+  "LAB-A" \
+  "Monitor issue one" \
+  "Synthetic note one"
+
+create_test_ticket \
+  "$BULK_ROOT" \
+  "NOC-9102" \
+  "Synthetic issue two" \
+  "Open" \
+  "Engineer Two" \
+  "LAB-B" \
+  "Monitor issue two" \
+  "Synthetic note two"
+
+cat > "$MOCK_STATE/atlas-NOC-9101.json" <<'JSON'
+{
+  "key": "NOC-9101",
+  "summary": "Synthetic issue one",
+  "description": "Synthetic description",
+  "status": "Escalated",
+  "assignee": "Engineer One",
+  "priority": "Medium"
+}
+JSON
+
+cat > "$MOCK_STATE/atlas-NOC-9102.json" <<'JSON'
+{
+  "key": "NOC-9102",
+  "summary": "Synthetic issue two",
+  "description": "Synthetic description",
+  "status": "Open",
+  "assignee": "Engineer Two",
+  "priority": "Medium"
+}
+JSON
+
+before=$(
+  find "$BULK_ROOT/open" -type f -name '*.json' -print0 |
+    sort -z |
+    xargs -0 sha256sum |
+    sha256sum |
+    awk '{print $1}'
+)
+
+if TIX_ROOT="$BULK_ROOT" tix sync --all >"$LAB/bulk-unchanged.out" 2>&1; then
+  pass "bulk sync all-unchanged check completed"
+else
+  fail "bulk sync all-unchanged check failed"
 fi
 
-printf '\n8. noc-status Read-Only Check\n'
+after=$(
+  find "$BULK_ROOT/open" -type f -name '*.json' -print0 |
+    sort -z |
+    xargs -0 sha256sum |
+    sha256sum |
+    awk '{print $1}'
+)
+
+assert_eq "$after" "$before" \
+  "all-unchanged bulk sync modified no tickets"
+
+if grep -Fq "NOC-9101     UNCHANGED" "$LAB/bulk-unchanged.out" &&
+   grep -Fq "NOC-9102     UNCHANGED" "$LAB/bulk-unchanged.out"; then
+  pass "all-unchanged tickets classified correctly"
+else
+  fail "all-unchanged classification missing"
+fi
+
+printf '\n9. tix Bulk Sync - Mixed Changes and Decline\n'
+
+cat > "$MOCK_STATE/atlas-NOC-9102.json" <<'JSON'
+{
+  "key": "NOC-9102",
+  "summary": "Changed synthetic issue two",
+  "description": "Changed synthetic description",
+  "status": "Done",
+  "assignee": "Changed Engineer",
+  "priority": "Highest"
+}
+JSON
+
+before=$(sha256sum "$BULK_ROOT/open/NOC-9102.json" | awk '{print $1}')
+
+if printf 'n\n' |
+   TIX_ROOT="$BULK_ROOT" tix sync --all \
+     >"$LAB/bulk-decline.out" 2>&1; then
+  pass "bulk sync decline completed safely"
+else
+  fail "bulk sync decline failed"
+fi
+
+after=$(sha256sum "$BULK_ROOT/open/NOC-9102.json" | awk '{print $1}')
+
+assert_eq "$after" "$before" \
+  "declined bulk change preserved entire ticket"
+
+if grep -Fq "NOC-9101     UNCHANGED" "$LAB/bulk-decline.out" &&
+   grep -Fq "NOC-9102     CHANGED" "$LAB/bulk-decline.out"; then
+  pass "mixed changed/unchanged tickets classified correctly"
+else
+  fail "mixed bulk classification incorrect"
+fi
+
+if grep -Fq "Skipped NOC-9102" "$LAB/bulk-decline.out"; then
+  pass "declined bulk ticket reported as skipped"
+else
+  fail "declined bulk ticket skip message missing"
+fi
+
+printf '\n10. tix Bulk Sync - Approve and Preserve NOC Fields\n'
+
+record="$BULK_ROOT/open/NOC-9102.json"
+
+old_environment=$(jq -r '.noc.environment' "$record")
+old_next_action=$(jq -r '.noc.next_action' "$record")
+old_notes=$(jq -r '.noc.notes' "$record")
+old_created=$(jq -r '.metadata.created' "$record")
+
+if printf 'y\n' |
+   TIX_ROOT="$BULK_ROOT" tix sync --all \
+     >"$LAB/bulk-approve.out" 2>&1; then
+  pass "approved bulk sync completed"
+else
+  fail "approved bulk sync failed"
+fi
+
+assert_eq \
+  "$(jq -r '.jira.summary' "$record")" \
+  "Changed synthetic issue two" \
+  "bulk sync updated Jira summary"
+
+assert_eq \
+  "$(jq -r '.jira.description' "$record")" \
+  "Changed synthetic description" \
+  "bulk sync updated Jira description"
+
+assert_eq \
+  "$(jq -r '.jira.status' "$record")" \
+  "Done" \
+  "bulk sync updated Jira status"
+
+assert_eq \
+  "$(jq -r '.jira.assignee' "$record")" \
+  "Changed Engineer" \
+  "bulk sync updated Jira assignee"
+
+assert_eq \
+  "$(jq -r '.jira.priority' "$record")" \
+  "Highest" \
+  "bulk sync updated Jira priority"
+
+assert_eq \
+  "$(jq -r '.noc.environment' "$record")" \
+  "$old_environment" \
+  "bulk sync preserved NOC environment"
+
+assert_eq \
+  "$(jq -r '.noc.next_action' "$record")" \
+  "$old_next_action" \
+  "bulk sync preserved NOC next action"
+
+assert_eq \
+  "$(jq -r '.noc.notes' "$record")" \
+  "$old_notes" \
+  "bulk sync preserved NOC notes"
+
+assert_eq \
+  "$(jq -r '.metadata.created' "$record")" \
+  "$old_created" \
+  "bulk sync preserved created timestamp"
+
+assert_eq \
+  "$(jq -r '.metadata.source' "$record")" \
+  "atlas" \
+  "bulk sync recorded Atlas source"
+
+printf '\n11. tix Bulk Sync - Done Ticket Remains Open\n'
+
+if [[ -f "$BULK_ROOT/open/NOC-9102.json" ]]; then
+  pass "Done Jira ticket remained locally open"
+else
+  fail "Done Jira ticket was removed from open tickets"
+fi
+
+if [[ ! -f "$BULK_ROOT/closed/NOC-9102.json" ]]; then
+  pass "Done Jira ticket was not automatically closed"
+else
+  fail "Done Jira ticket was automatically moved to closed"
+fi
+
+printf '\n12. tix Bulk Sync - Partial Atlas Failure\n'
+
+create_test_ticket \
+  "$BULK_ROOT" \
+  "NOC-9103" \
+  "Synthetic issue three" \
+  "Escalated" \
+  "Engineer Three" \
+  "LAB-C" \
+  "Monitor issue three" \
+  "Synthetic note three"
+
+printf 'servicefail\n' > "$MOCK_STATE/atlas-mode-NOC-9102"
+
+cat > "$MOCK_STATE/atlas-NOC-9103.json" <<'JSON'
+{
+  "key": "NOC-9103",
+  "summary": "Synthetic issue three",
+  "description": "Synthetic description",
+  "status": "Escalated",
+  "assignee": "Engineer Three",
+  "priority": "Medium"
+}
+JSON
+
+failed_before=$(sha256sum "$BULK_ROOT/open/NOC-9102.json" | awk '{print $1}')
+
+if TIX_ROOT="$BULK_ROOT" tix sync --all \
+  >"$LAB/bulk-partial-failure.out" 2>&1; then
+  pass "bulk sync continued after one Atlas failure"
+else
+  fail "bulk sync aborted after one Atlas failure"
+fi
+
+failed_after=$(sha256sum "$BULK_ROOT/open/NOC-9102.json" | awk '{print $1}')
+
+assert_eq "$failed_after" "$failed_before" \
+  "failed Atlas ticket remained unchanged"
+
+if grep -Eq 'NOC-9102[[:space:]]+FAILED' \
+  "$LAB/bulk-partial-failure.out"; then
+  pass "failed Atlas ticket was reported"
+else
+  fail "failed Atlas ticket was not reported"
+fi
+
+if grep -Eq 'NOC-9103[[:space:]]+UNCHANGED'\
+  "$LAB/bulk-partial-failure.out"; then
+  pass "bulk sync continued to later ticket"
+else
+  fail "later ticket was not processed after Atlas failure"
+fi
+
+rm -f "$MOCK_STATE/atlas-mode-NOC-9102"
+
+fi
+
+printf '\n13. noc-status Read-Only Check\n'
 if [[ -z "${PROD[noc-status]}" ]]; then
   skip "noc-status not installed"
 else
@@ -158,7 +504,7 @@ else
   assert_eq "$after" "$before" "noc-status changed no test records"
 fi
 
-printf '\n9. noc-handover Overwrite Protection\n'
+printf '\n14. noc-handover Overwrite Protection\n'
 if [[ -z "${PROD[noc-handover]}" ]]; then
   skip "noc-handover not installed"
 else
@@ -171,7 +517,7 @@ else
   assert_eq "$after" "$before" "existing handover was not overwritten"
 fi
 
-printf '\n10. noc-handover Confluence Documentation Carry-Through\n'
+printf '\n15. noc-handover Confluence Documentation Carry-Through\n'
 
 if [[ -z "${PROD[noc-handover]}" ]]; then
   skip "noc-handover not installed"
@@ -241,7 +587,7 @@ HANDOVER
   rm -f "$MOCK_STATE/copilot-output"
 fi
 
-printf '\n11. noc-inv Invalid URL Rejection\n'
+printf '\n16. noc-inv Invalid URL Rejection\n'
 if [[ -z "${PROD[noc-inv]}" ]]; then
   skip "noc-inv not installed"
 else
