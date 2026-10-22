@@ -12,6 +12,7 @@ OPTIONAL_TOOLS=(kubectl wslview jq)
 export BROWSER="${BROWSER:-wslview}"       # lets WSL open your Windows browser
 
 CHECK_DD=false; START_COPILOT=true
+START_WARNINGS=0
 for arg in "$@"; do
   case "$arg" in
     --check-dd)   CHECK_DD=true ;;
@@ -22,6 +23,10 @@ done
 ok()   { printf '  \e[32m✔\e[0m %s\n' "$1"; }
 warn() { printf '  \e[33m!\e[0m %s\n' "$1"; }
 fail() { printf '  \e[31m✘\e[0m %s\n' "$1"; }
+readiness_warn() {
+  START_WARNINGS=$((START_WARNINGS + 1))
+  warn "$1"
+}
 
 # True only when 'm365 auth status' reports signed_in AND session_usable = true
 m365_signed_in() {
@@ -123,19 +128,54 @@ else
   warn "Skipped (use --check-dd)"
 fi
 
-# 6. Open ticket summary
+# 6. Shift readiness
 echo
-echo "[6] Open Tickets"
+echo "[6] Shift Readiness"
 
-if command -v tix >/dev/null 2>&1; then
-  tix list
+STATUS_TMP=$(mktemp)
+trap 'rm -f "$STATUS_TMP"' EXIT
+
+if command -v noc-status >/dev/null 2>&1; then
+  if noc-status --date "$TODAY" | tee "$STATUS_TMP"; then
+    :
+  else
+    readiness_warn "noc-status returned an error"
+  fi
+
+  if grep -q 'Jira status is .* but ticket is still locally open' "$STATUS_TMP"; then
+    readiness_warn "One or more Jira-completed tickets still need local NOC review"
+  fi
+
+  if grep -q 'Jira fields are not Atlas-synced' "$STATUS_TMP"; then
+    readiness_warn "One or more tickets need Atlas synchronization"
+  fi
+
+  if grep -q 'Next Action looks like a migrated timestamp' "$STATUS_TMP"; then
+    readiness_warn "One or more tickets have an invalid-looking Next Action"
+  fi
 else
-  warn "tix not found - open-ticket summary skipped"
+  readiness_warn "noc-status not found - falling back to basic ticket list"
+
+  if command -v tix >/dev/null 2>&1; then
+    tix list
+  else
+    readiness_warn "tix not found - open-ticket summary skipped"
+  fi
 fi
 
 # 7. Launch
-echo; echo "=== Ready: $SHIFT_DIR ==="
-echo "Notes file: $NOTES"
+echo
+echo "=== SHIFT READINESS ==="
+
+if [[ $START_WARNINGS -eq 0 ]]; then
+  ok "SHIFT READY"
+else
+  warn "SHIFT READY WITH $START_WARNINGS REVIEW ITEM(S)"
+fi
+
+echo
+echo "Workspace: $SHIFT_DIR"
+echo "Notes:     $NOTES"
 cd "$SHIFT_DIR" || exit 1
 if $START_COPILOT && command -v copilot >/dev/null; then
   read -rp "Press Enter to open Copilot (Ctrl+C to stay in shell)... " _
