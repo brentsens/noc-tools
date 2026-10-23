@@ -587,7 +587,188 @@ HANDOVER
   rm -f "$MOCK_STATE/copilot-output"
 fi
 
-printf '\n16. noc-inv Invalid URL Rejection\n'
+printf '\n16. noc-inv Generated Record Validation - Valid\n'
+
+if [[ -z "${PROD[noc-inv]}" ]]; then
+  skip "noc-inv not installed"
+else
+  INV_DAY="2026-10-20"
+  INV_NAME="synthetic-valid-investigation"
+  INV_URL="https://app.datadoghq.com/notebook/123456"
+  INV_SHIFT="$HOME/noc/$INV_DAY"
+  INV_MAIN="$INV_SHIFT/investigations/$INV_NAME/investigation.md"
+  INV_NOTES="$INV_SHIFT/shift-notes.md"
+
+  mkdir -p "$INV_SHIFT"
+  printf '# Synthetic shift notes\n' > "$INV_NOTES"
+
+  cat > "$MOCK_STATE/copilot-output" <<EOF
+# Investigation: $INV_NAME
+
+- Status: Reviewed Notebook Summary
+- Source of truth: Final Datadog Notebook
+- Datadog Notebook: $INV_URL
+- Capture method: Datadog MCP
+
+## Summary
+
+Synthetic investigation summary.
+
+## Service / Environment
+
+Synthetic production service.
+
+## Customer / Service Impact
+
+No confirmed customer impact.
+
+## Timeline
+
+No material timeline events.
+
+## Confirmed Findings
+
+Synthetic finding confirmed from Notebook evidence.
+
+## Current Status
+
+Service stable.
+
+## Actions Taken
+
+No additional action taken.
+
+## Escalation / Ownership
+
+No escalation required.
+
+## Next Actions
+
+Continue monitoring.
+
+## Handover Summary
+
+Synthetic investigation is stable and ready for handover.
+EOF
+
+  if noc-inv --date "$INV_DAY" "$INV_NAME" "$INV_URL" \
+      >"$LAB/inv-valid.out" 2>&1; then
+    pass "valid generated investigation completed"
+  else
+    fail "valid generated investigation failed"
+  fi
+
+  if grep -Fq "Result: READY FOR HANDOVER" "$LAB/inv-valid.out"; then
+    pass "valid generated record passed output validation"
+  else
+    fail "valid generated record did not report READY FOR HANDOVER"
+  fi
+
+  if [[ -s "$INV_MAIN" ]]; then
+    pass "valid investigation record was saved"
+  else
+    fail "valid investigation record missing"
+  fi
+
+  if grep -Fq "Reviewed investigation: $INV_NAME" "$INV_NOTES"; then
+    pass "valid investigation was added to shift notes"
+  else
+    fail "valid investigation was not added to shift notes"
+  fi
+
+  rm -f "$MOCK_STATE/copilot-output"
+fi
+
+printf '\n17. noc-inv Generated Record Validation - Malformed\n'
+
+if [[ -z "${PROD[noc-inv]}" ]]; then
+  skip "noc-inv not installed"
+else
+  INV_DAY="2026-10-20"
+  INV_NAME="synthetic-malformed-investigation"
+  INV_URL="https://app.datadoghq.com/notebook/654321"
+  INV_SHIFT="$HOME/noc/$INV_DAY"
+  INV_MAIN="$INV_SHIFT/investigations/$INV_NAME/investigation.md"
+  INV_NOTES="$INV_SHIFT/shift-notes.md"
+
+  cat > "$MOCK_STATE/copilot-output" <<EOF
+# Investigation: $INV_NAME
+
+- Status: Reviewed Notebook Summary
+- Source of truth: Final Datadog Notebook
+- Datadog Notebook: $INV_URL
+- Capture method: Datadog MCP
+
+## Summary
+
+## Service / Environment
+
+Synthetic service.
+
+## Customer / Service Impact
+
+Unknown.
+
+## Timeline
+
+No timeline available.
+
+## Confirmed Findings
+
+## Current Status
+
+## Actions Taken
+
+None.
+
+## Escalation / Ownership
+
+None.
+
+## Next Actions
+
+None.
+
+## Handover Summary
+
+EOF
+
+  if noc-inv --date "$INV_DAY" "$INV_NAME" "$INV_URL" \
+      >"$LAB/inv-malformed.out" 2>&1; then
+    pass "malformed generated investigation was preserved for review"
+  else
+    fail "malformed generated investigation command failed unexpectedly"
+  fi
+
+  if grep -Fq "Result: GENERATED RECORD NEEDS REVIEW" \
+      "$LAB/inv-malformed.out"; then
+    pass "malformed generated record failed output validation"
+  else
+    fail "malformed generated record did not report review requirement"
+  fi
+
+  if [[ -s "$INV_MAIN" ]]; then
+    pass "malformed generated record was preserved"
+  else
+    fail "malformed generated record was not preserved"
+  fi
+
+  if ! grep -Fq "Reviewed investigation: $INV_NAME" "$INV_NOTES"; then
+    pass "malformed investigation was withheld from shift notes"
+  else
+    fail "malformed investigation leaked into shift notes"
+  fi
+
+  if grep -Fq "failed output validation" "$LAB/inv-malformed.out"; then
+    pass "malformed investigation displayed output-validation warning"
+  else
+    fail "output-validation warning missing"
+  fi
+
+  rm -f "$MOCK_STATE/copilot-output"
+fi
+
+printf '\n18. noc-inv Invalid URL Rejection\n'
 if [[ -z "${PROD[noc-inv]}" ]]; then
   skip "noc-inv not installed"
 else

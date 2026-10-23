@@ -55,6 +55,104 @@ LOG="$DIR/noc-inv.log"
 mkdir -p "$EVIDENCE_DIR"
 log(){ printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
 
+validate_generated_record() {
+  local file="$1"
+  local issues=0
+  local section content
+
+  echo
+  echo "[3] Generated Record Validation"
+
+  if [[ ! -s "$file" ]]; then
+    echo "  [WARN] investigation.md is missing or empty"
+    echo
+    echo "Result: GENERATED RECORD NEEDS REVIEW"
+    return 1
+  fi
+
+  # Required metadata produced by noc-inv/Copilot.
+  for pattern in \
+    "- Status:" \
+    "- Source of truth:" \
+    "- Datadog Notebook:" \
+    "- Capture method:"
+  do
+    if grep -Fq -- "$pattern" "$file"; then
+      printf '  [OK]   %s\n' "${pattern#- }"
+    else
+      printf '  [WARN] Missing metadata: %s\n' "${pattern#- }"
+      issues=$((issues + 1))
+    fi
+  done
+
+  # Every expected heading must exist.
+  local expected_sections=(
+    "Summary"
+    "Service / Environment"
+    "Customer / Service Impact"
+    "Timeline"
+    "Confirmed Findings"
+    "Current Status"
+    "Actions Taken"
+    "Escalation / Ownership"
+    "Next Actions"
+    "Handover Summary"
+  )
+
+  for section in "${expected_sections[@]}"; do
+    if grep -Fq -- "## $section" "$file"; then
+      printf '  [OK]   %s heading\n' "$section"
+    else
+      printf '  [WARN] Missing heading: %s\n' "$section"
+      issues=$((issues + 1))
+    fi
+  done
+
+  # These are the minimum sections that must contain usable generated text.
+  local required_content=(
+    "Summary"
+    "Confirmed Findings"
+    "Current Status"
+    "Handover Summary"
+  )
+
+  for section in "${required_content[@]}"; do
+    content=$(
+      awk -v heading="## $section" '
+        $0 == heading {capture=1; next}
+        capture && /^## / {exit}
+        capture && NF {print; exit}
+      ' "$file"
+    )
+
+    if [[ -n "$content" ]]; then
+      printf '  [OK]   %s content\n' "$section"
+    else
+      printf '  [WARN] Empty generated section: %s\n' "$section"
+      issues=$((issues + 1))
+    fi
+  done
+
+  # Confirm the generated record references the final Notebook passed to noc-inv.
+  if grep -Fq -- "$NOTEBOOK_URL" "$file"; then
+    printf '  [OK]   Final Datadog Notebook URL\n'
+  else
+    printf '  [WARN] Final Datadog Notebook URL missing from generated record\n'
+    issues=$((issues + 1))
+  fi
+
+  echo
+
+  if [[ $issues -eq 0 ]]; then
+    echo "Result: READY FOR HANDOVER"
+    return 0
+  fi
+
+  echo "Result: GENERATED RECORD NEEDS REVIEW"
+  echo "Issues: $issues"
+  return 1
+}
+
 if $OPEN_AFTER && [[ -f "$MAIN" && -z "$NOTEBOOK_URL" ]]; then ${EDITOR:-nano} "$MAIN"; exit 0; fi
 [[ -n "$NOTEBOOK_URL" ]] || read -rp "FINAL Datadog Notebook URL: " NOTEBOOK_URL
 case "$NOTEBOOK_URL" in
@@ -161,11 +259,30 @@ if ! $AUTOMATED; then
   case "$choice" in 1) write_manual ;; 2) log "EXIT: manual fallback declined"; exit 1 ;; *) echo "Invalid selection." >&2; exit 1 ;; esac
 fi
 
+GENERATED_RECORD_OK=false
+
+if validate_generated_record "$MAIN"; then
+  GENERATED_RECORD_OK=true
+  log "Generated investigation record validation: READY FOR HANDOVER"
+else
+  log "WARNING: Generated investigation record validation failed"
+fi
+
 # Never copy raw MCP output or the external validation report into shift notes.
 # Only point the handover workflow to the reviewed Notebook-based local summary.
-if [[ -f "$NOTES" ]] && ! grep -Fq "Reviewed investigation: $NAME" "$NOTES"; then
+if $GENERATED_RECORD_OK &&
+   [[ -f "$NOTES" ]] &&
+   ! grep -Fq "Reviewed investigation: $NAME" "$NOTES"; then
   printf '\n- %s Reviewed investigation: %s - Summary: %s - Datadog Notebook: %s\n' "$(date '+%H:%M')" "$NAME" "$MAIN" "$NOTEBOOK_URL" >> "$NOTES"
   log "Reviewed investigation reference added to shift notes"
+fi
+
+if ! $GENERATED_RECORD_OK; then
+  echo
+  echo "[WARN] The final Notebook was accepted, but the generated investigation record failed output validation."
+  echo "Review: $MAIN"
+  echo "The investigation was NOT added to shift notes."
+  log "Shift-note reference withheld because generated record validation failed"
 fi
 
 log "SUCCESS"
