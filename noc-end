@@ -337,3 +337,147 @@ if [[ -s "$HANDOVER" ]]; then
 else
   echo "No handover was generated."
 fi
+
+# 5. Optional handover delivery
+if [[ -s "$HANDOVER" ]]; then
+  echo
+  echo "[5] Handover Delivery"
+  echo
+  echo "  1) Send to myself"
+  echo "  2) Send to another email address"
+  echo "  3) Do not send"
+  echo
+
+  read -rp "Selection [1-3, default 3]: " delivery_choice
+  delivery_choice=${delivery_choice:-3}
+
+  case "$delivery_choice" in
+
+    1)
+      echo
+      echo "Delivery mode: Send to myself"
+
+      if ! command -v m365 >/dev/null 2>&1; then
+        echo "ERROR: m365 not found. Handover was not sent." >&2
+        exit 1
+      fi
+
+      SUBJECT="NOC Shift Handover - $US_DATE"
+
+      echo
+      echo "=== EMAIL PREVIEW ==="
+      echo
+
+      if ! m365 mail send \
+          --note-to-self \
+          --subject "$SUBJECT" \
+          --body-file "$HANDOVER" \
+          --format md \
+          --preview \
+          --human; then
+        echo
+        echo "ERROR: M365 email preview failed." >&2
+        exit 1
+      fi
+
+      echo
+      echo "Preview complete. Nothing was sent."
+
+      echo
+      read -rp "Send this handover to yourself now? [y/N]: " send_choice
+
+      if [[ "$send_choice" =~ ^[Yy]$ ]]; then
+        if m365 mail send \
+            --note-to-self \
+            --subject "$SUBJECT" \
+            --body-file "$HANDOVER" \
+            --format md \
+            --human; then
+
+            echo
+            echo "[OK] Handover sent to your signed-in M365 mailbox."
+          else
+            echo
+            echo "ERROR: Handover email send failed." >&2
+            exit 1
+          fi
+        else
+          echo
+          echo "Send canceled. Handover was not emailed."
+        fi
+        ;;
+
+    2)
+      echo
+      read -rp "Recipient email address: " DELIVERY_EMAIL
+
+      if [[ ! "$DELIVERY_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        echo "ERROR: Invalid email address." >&2
+        exit 1
+      fi
+
+      if ! command -v m365 >/dev/null 2>&1; then
+        echo "ERROR: m365 not found. Handover was not sent." >&2
+        exit 1
+      fi
+
+      SUBJECT="NOC Shift Handover - $US_DATE"
+
+      echo
+      echo "Delivery mode: Send to another email"
+      echo "Recipient:     $DELIVERY_EMAIL"
+      echo
+      echo "=== EMAIL PREVIEW ==="
+      echo
+
+      if ! m365 mail send \
+          --to "$DELIVERY_EMAIL" \
+          --subject "$SUBJECT" \
+          --body-file "$HANDOVER" \
+          --format md \
+          --preview \
+          --human; then
+        echo
+        echo "ERROR: M365 email preview failed." >&2
+        exit 1
+      fi
+
+      echo
+      echo "Preview complete. Nothing was sent."
+
+      echo
+      read -rp "Send this handover to $DELIVERY_EMAIL now? [y/N]: " send_choice
+
+        if [[ "$send_choice" =~ ^[Yy]$ ]]; then
+          if m365 mail send \
+              --to "$DELIVERY_EMAIL" \
+              --subject "$SUBJECT" \
+              --body-file "$HANDOVER" \
+              --format md \
+              --human; then
+
+            echo
+            echo "[OK] Handover sent to $DELIVERY_EMAIL."
+          else
+            echo
+            echo "ERROR: Handover email send failed." >&2
+            exit 1
+          fi
+        else
+          echo
+          echo "Send canceled. Handover was not emailed."
+        fi
+        ;;
+
+    3)
+      echo
+      echo "Handover delivery skipped."
+      exit 0
+      ;;
+
+    *)
+      echo "Invalid selection. Handover was not sent." >&2
+      exit 1
+      ;;
+  esac
+fi

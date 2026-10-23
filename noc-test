@@ -854,9 +854,10 @@ exit 99
 MOCK
   chmod +x "$END_TEST_BIN/noc-handover"
 
-  if PATH="$END_TEST_BIN:$MOCK_BIN:/usr/bin:/bin" \
-     noc-end --date "$END_DAY" --skip-sync \
-     >"$LAB/noc-end-existing.out" 2>&1; then
+  if printf '3\n' |
+   PATH="$END_TEST_BIN:$MOCK_BIN:/usr/bin:/bin" \
+   noc-end --date "$END_DAY" --skip-sync \
+   >"$LAB/noc-end-existing.out" 2>&1; then
     pass "noc-end existing-handover path completed"
   else
     fail "noc-end existing-handover path failed"
@@ -915,6 +916,13 @@ MOCK
     pass "noc-end reported overwrite protection"
   else
     fail "noc-end overwrite protection message missing"
+  fi
+
+  if grep -Fq "Handover delivery skipped." \
+      "$LAB/noc-end-existing.out"; then
+    pass "noc-end allowed delivery to be skipped"
+  else
+    fail "noc-end delivery-skip confirmation missing"
   fi
 fi
 
