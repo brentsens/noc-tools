@@ -27,7 +27,7 @@ done
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 declare -A PROD
 
-for cmd in tix noc-start noc-status noc-inv noc-handover; do
+for cmd in tix noc-start noc-status noc-inv noc-handover noc-end; do
   if [[ -x "$SCRIPT_DIR/$cmd" ]]; then
     PROD[$cmd]="$SCRIPT_DIR/$cmd"
   else
@@ -43,7 +43,7 @@ cleanup(){ if $KEEP; then echo "Test lab retained: $LAB"; else rm -rf "$LAB"; fi
 trap cleanup EXIT INT TERM
 
 # Link installed scripts into the isolated PATH. No test writes to production HOME.
-for cmd in tix noc-start noc-status noc-inv noc-handover; do
+for cmd in tix noc-start noc-status noc-inv noc-handover noc-end; do
   if [[ -n "${PROD[$cmd]}" ]]; then ln -s "${PROD[$cmd]}" "$MOCK_BIN/$cmd"; fi
 done
 
@@ -149,7 +149,7 @@ printf 'Production data path used: no\n'
 printf 'Test HOME: %s\n' "$HOME"
 
 printf '\n1. Installed Script Syntax\n'
-for cmd in tix noc-start noc-status noc-inv noc-handover; do
+for cmd in tix noc-start noc-status noc-inv noc-handover noc-end; do
   if [[ -z "${PROD[$cmd]}" ]]; then skip "$cmd not installed"; continue; fi
   if bash -n "${PROD[$cmd]}" >/dev/null 2>&1; then pass "$cmd syntax valid"; else fail "$cmd syntax invalid"; fi
 done
@@ -778,6 +778,144 @@ else
     pass "invalid Notebook URL rejected"
   fi
   if find "$HOME/noc" -path '*/investigations/synthetic-investigation/investigation.md' -print -quit | grep -q .; then fail "invalid URL created investigation record"; else pass "invalid URL created no investigation record"; fi
+fi
+
+printf '\n19. noc-end Existing Handover / Skip Sync\n'
+
+if [[ -z "${PROD[noc-end]:-}" ]]; then
+  skip "noc-end not available"
+else
+  END_DAY="2026-10-21"
+  END_SHIFT="$HOME/noc/$END_DAY"
+  END_HANDOVER="$END_SHIFT/handover/handover-$END_DAY.md"
+  END_TEST_BIN="$LAB/end-test-bin"
+  TIX_SENTINEL="$LAB/tix-called"
+
+  mkdir -p "$END_SHIFT/handover"
+  mkdir -p "$END_TEST_BIN"
+
+  printf '# Synthetic shift notes\n' > "$END_SHIFT/shift-notes.md"
+  printf 'ORIGINAL HANDOVER\n' > "$END_HANDOVER"
+
+  handover_before=$(sha256sum "$END_HANDOVER" | awk '{print $1}')
+
+  # tix must NOT run when --skip-sync is used.
+  cat > "$END_TEST_BIN/tix" <<EOF
+#!/usr/bin/env bash
+touch "$TIX_SENTINEL"
+echo "ERROR: tix should not have been called" >&2
+exit 99
+EOF
+  chmod +x "$END_TEST_BIN/tix"
+
+  # Synthetic clear noc-status.
+  cat > "$END_TEST_BIN/noc-status" <<'MOCK'
+#!/usr/bin/env bash
+cat <<'OUT'
+NOC STATUS
+
+Shift
+  [OK] Shift directory
+  [OK] Shift notes available
+
+Needs Review
+  Review: None detected
+
+Investigations
+  Investigations: None
+
+Read-only status check complete. No records were changed.
+OUT
+exit 0
+MOCK
+  chmod +x "$END_TEST_BIN/noc-status"
+
+  # Synthetic healthy noc-doctor.
+  cat > "$END_TEST_BIN/noc-doctor" <<'MOCK'
+#!/usr/bin/env bash
+cat <<'OUT'
+NOC DOCTOR
+
+Result
+  Passed:   10
+  Warnings: 2
+  Failed:   0
+  Health:   HEALTHY WITH WARNINGS
+OUT
+exit 0
+MOCK
+  chmod +x "$END_TEST_BIN/noc-doctor"
+
+  # Must not run because the synthetic handover already exists.
+  cat > "$END_TEST_BIN/noc-handover" <<'MOCK'
+#!/usr/bin/env bash
+echo "ERROR: noc-handover should not have been called" >&2
+exit 99
+MOCK
+  chmod +x "$END_TEST_BIN/noc-handover"
+
+  if PATH="$END_TEST_BIN:$MOCK_BIN:/usr/bin:/bin" \
+     noc-end --date "$END_DAY" --skip-sync \
+     >"$LAB/noc-end-existing.out" 2>&1; then
+    pass "noc-end existing-handover path completed"
+  else
+    fail "noc-end existing-handover path failed"
+  fi
+
+  handover_after=$(sha256sum "$END_HANDOVER" | awk '{print $1}')
+
+  assert_eq \
+    "$handover_after" \
+    "$handover_before" \
+    "noc-end preserved existing handover"
+
+  if [[ ! -e "$TIX_SENTINEL" ]]; then
+    pass "noc-end --skip-sync did not call tix"
+  else
+    fail "noc-end --skip-sync unexpectedly called tix"
+  fi
+
+  if grep -Fq "Jira freshness:    SKIPPED" \
+      "$LAB/noc-end-existing.out"; then
+    pass "noc-end honored --skip-sync"
+  else
+    fail "noc-end did not report skipped Jira sync"
+  fi
+
+  if grep -Fq "Shift status:      CLEAR" \
+      "$LAB/noc-end-existing.out"; then
+    pass "noc-end reported clear shift status"
+  else
+    fail "noc-end clear shift status missing"
+  fi
+
+  if grep -Fq "Automation health: HEALTHY WITH WARNINGS" \
+      "$LAB/noc-end-existing.out"; then
+    pass "noc-end preserved healthy-with-warnings state"
+  else
+    fail "noc-end health summary incorrect"
+  fi
+
+  if grep -Fq "Handover:          ALREADY EXISTS" \
+      "$LAB/noc-end-existing.out"; then
+    pass "noc-end detected existing handover"
+  else
+    fail "noc-end failed to detect existing handover"
+  fi
+
+  if grep -Fq "READY FOR HANDOVER" \
+      "$LAB/noc-end-existing.out"; then
+    pass "noc-end reached handover readiness"
+  else
+    fail "noc-end did not reach handover readiness"
+  fi
+
+  if grep -Fq "Existing handover was not overwritten." \
+      "$LAB/noc-end-existing.out"; then
+    pass "noc-end reported overwrite protection"
+  else
+    fail "noc-end overwrite protection message missing"
+  fi
 fi
 
 printf '\nResult\n'

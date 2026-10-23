@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# noc-end - controlled end-of-shift orchestration for the NOC workflow
+# Usage: noc-end [--yesterday | --date YYYY-MM-DD] [--skip-sync]
+
+set -uo pipefail
+
+NOC_ROOT="$HOME/noc"
+CUTOFF_HOUR=6
+
+DAY=""
+SKIP_SYNC=false
+
+usage() {
+  cat <<'TXT'
+Usage:
+  noc-end
+  noc-end --yesterday
+  noc-end --date YYYY-MM-DD
+  noc-end --skip-sync
+  noc-end --yesterday --skip-sync
+  noc-end --date YYYY-MM-DD --skip-sync
+
+Options:
+  --yesterday        Use the previous calendar day's shift.
+  --date YYYY-MM-DD  Use a specific shift date.
+  --skip-sync        Skip the Jira freshness check.
+  -h, --help         Show this help.
+
+noc-end coordinates existing NOC tools.
+It does not automatically close tickets, alter NOC Next Actions,
+force-regenerate handovers, or send email.
+TXT
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yesterday)
+      DAY=$(date -d yesterday +%F)
+      ;;
+
+    --date)
+      [[ $# -ge 2 ]] || {
+        echo "ERROR: --date requires YYYY-MM-DD" >&2
+        exit 1
+      }
+      DAY="$2"
+      shift
+      ;;
+
+    --skip-sync)
+      SKIP_SYNC=true
+      ;;
+
+    -h|--help)
+      usage
+      exit 0
+      ;;
+
+    *)
+      echo "ERROR: Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+
+  shift
+done
+
+if [[ -z "$DAY" ]]; then
+  if [[ $(date +%-H) -lt $CUTOFF_HOUR ]]; then
+    DAY=$(date -d yesterday +%F)
+  else
+    DAY=$(date +%F)
+  fi
+fi
+
+date -d "$DAY" >/dev/null 2>&1 || {
+  echo "ERROR: Invalid date: $DAY" >&2
+  exit 1
+}
+
+SHIFT_DIR="$NOC_ROOT/$DAY"
+NOTES="$SHIFT_DIR/shift-notes.md"
+HANDOVER="$SHIFT_DIR/handover/handover-$DAY.md"
+US_DATE=$(date -d "$DAY" +%m/%d/%Y)
+
+echo
+echo "=== NOC END: $US_DATE ==="
+echo
+echo "Shift date:      $DAY"
+echo "Shift workspace: $SHIFT_DIR"
+echo "Shift notes:     $NOTES"
+echo "Handover:        $HANDOVER"
+
+if $SKIP_SYNC; then
+  echo "Jira sync:       SKIPPED"
+else
+  echo "Jira sync:       ENABLED"
+fi
+
+echo
+echo "[1] Jira Freshness"
+
+if $SKIP_SYNC; then
+  echo "  [SKIP] Jira synchronization skipped by request."
+else
+  if ! command -v tix >/dev/null 2>&1; then
+    echo "  [ERROR] tix not found." >&2
+    exit 1
+  fi
+
+  echo "Checking locally tracked Jira tickets..."
+  echo
+
+  if ! tix sync --all; then
+    echo
+    echo "  [WARN] Jira freshness check returned an error."
+    echo "  Existing local ticket records were preserved."
+    echo
+    echo "You can continue later with:"
+    echo "  noc-end --date $DAY --skip-sync"
+    exit 1
+  fi
+fi
+
+echo
+echo "[2] Shift Status"
+
+if ! command -v noc-status >/dev/null 2>&1; then
+  echo "  [ERROR] noc-status not found." >&2
+  exit 1
+fi
+
+STATUS_TMP=$(mktemp)
+trap 'rm -f "$STATUS_TMP"' EXIT
+
+if ! noc-status --date "$DAY" | tee "$STATUS_TMP"; then
+  echo
+  echo "  [ERROR] noc-status failed." >&2
+  exit 1
+fi
+
+REVIEW_REQUIRED=false
+
+if grep -q 'Jira status is .* but ticket is still locally open' "$STATUS_TMP"; then
+  REVIEW_REQUIRED=true
+fi
+
+if grep -q 'Jira fields are not Atlas-synced' "$STATUS_TMP"; then
+  REVIEW_REQUIRED=true
+fi
+
+if grep -q 'Next Action looks like a migrated timestamp' "$STATUS_TMP"; then
+  REVIEW_REQUIRED=true
+fi
+
+echo
+
+if $REVIEW_REQUIRED; then
+  echo "=== END-OF-SHIFT REVIEW REQUIRED ==="
+  echo
+  echo "noc-status found one or more items requiring review."
+  echo
+  echo "  1) Stop and review"
+  echo "  2) Continue anyway"
+  echo
+
+  read -rp "Selection [1-2, default 1]: " choice
+  choice=${choice:-1}
+
+  case "$choice" in
+    1)
+      echo
+      echo "Stopped. Nothing else was changed."
+      echo "Resolve the review items, then run noc-end again."
+      exit 0
+      ;;
+    2)
+      echo
+      echo "[WARN] Continuing with unresolved review items."
+      ;;
+    *)
+      echo "Invalid selection. Stopping." >&2
+      exit 1
+      ;;
+  esac
+else
+  echo "=== END-OF-SHIFT STATUS: CLEAR ==="
+fi
+
+echo
+echo "[3] Automation Health"
+
+if ! command -v noc-doctor >/dev/null 2>&1; then
+  echo "  [ERROR] noc-doctor not found." >&2
+  exit 1
+fi
+
+DOCTOR_TMP=$(mktemp)
+
+if noc-doctor --deep --date "$DAY" | tee "$DOCTOR_TMP"; then
+  DOCTOR_RC=0
+else
+  DOCTOR_RC=$?
+fi
+
+echo
+
+if [[ $DOCTOR_RC -ne 0 ]]; then
+  echo "=== AUTOMATION HEALTH: UNHEALTHY ==="
+  echo
+  echo "noc-doctor detected one or more failures."
+  echo
+  echo "  1) Stop and review"
+  echo "  2) Continue anyway"
+  echo
+
+  read -rp "Selection [1-2, default 1]: " choice
+  choice=${choice:-1}
+
+  case "$choice" in
+    1)
+      echo
+      echo "Stopped. No handover was generated."
+      exit 0
+      ;;
+    2)
+      echo
+      echo "[WARN] Continuing despite automation health failures."
+      ;;
+    *)
+      echo "Invalid selection. Stopping." >&2
+      exit 1
+      ;;
+  esac
+
+elif grep -Fq "Health:   HEALTHY WITH WARNINGS" "$DOCTOR_TMP"; then
+
+  echo "=== AUTOMATION HEALTH: HEALTHY WITH WARNINGS ==="
+
+else
+
+  echo "=== AUTOMATION HEALTH: HEALTHY ==="
+
+fi
+
+
+echo
+echo "============================================================"
+echo "END-OF-SHIFT READINESS"
+echo "============================================================"
+
+if $SKIP_SYNC; then
+  echo "  Jira freshness:    SKIPPED"
+else
+  echo "  Jira freshness:    CHECKED"
+fi
+
+if $REVIEW_REQUIRED; then
+  echo "  Shift status:      REVIEW OVERRIDE"
+else
+  echo "  Shift status:      CLEAR"
+fi
+
+if [[ $DOCTOR_RC -ne 0 ]]; then
+  echo "  Automation health: OVERRIDE"
+elif grep -Fq "Health:   HEALTHY WITH WARNINGS" "$DOCTOR_TMP"; then
+  echo "  Automation health: HEALTHY WITH WARNINGS"
+else
+  echo "  Automation health: HEALTHY"
+fi
+
+if [[ -s "$HANDOVER" ]]; then
+  echo "  Handover:          ALREADY EXISTS"
+else
+  echo "  Handover:          NOT GENERATED"
+fi
+
+echo
+echo "READY FOR HANDOVER"
+
+rm -f "$DOCTOR_TMP"
+
+echo
+echo "[4] Handover"
+
+if [[ -s "$HANDOVER" ]]; then
+  echo "  [OK] Existing handover found:"
+  echo "       $HANDOVER"
+  echo
+  echo "Existing handover was not overwritten."
+else
+  if ! command -v noc-handover >/dev/null 2>&1; then
+    echo "  [ERROR] noc-handover not found." >&2
+    exit 1
+  fi
+
+  echo
+  read -rp "Generate handover now? [Y/n]: " choice
+  choice=${choice:-y}
+
+  if [[ "$choice" =~ ^[Yy]$ ]]; then
+    echo
+    echo "Generating handover..."
+
+    if noc-handover --date "$DAY"; then
+      if [[ -s "$HANDOVER" ]]; then
+        echo
+        echo "  [OK] Handover generated:"
+        echo "       $HANDOVER"
+      else
+        echo
+        echo "  [WARN] noc-handover completed but expected file was not found."
+        exit 1
+      fi
+    else
+      echo
+      echo "  [ERROR] noc-handover failed." >&2
+      exit 1
+    fi
+  else
+    echo
+    echo "Handover generation skipped."
+  fi
+fi
+
+echo
+echo "============================================================"
+echo "NOC END COMPLETE"
+echo "============================================================"
+
+if [[ -s "$HANDOVER" ]]; then
+  echo "Handover:"
+  echo "  $HANDOVER"
+  echo
+  echo "Review the handover before sending."
+else
+  echo "No handover was generated."
+fi
