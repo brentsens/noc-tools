@@ -1402,7 +1402,7 @@ EOF
   # 6 -> Health Check
   # Enter -> return to console
   # 8 -> Exit
-  if printf '2\n\n7\n\n9\n' |
+  if printf '7\n\n9\n\n11\n' |
      PATH="$CONSOLE_BIN:$MOCK_BIN:/usr/bin:/bin" \
      noc-console --date "$CONSOLE_DAY" \
      >"$LAB/noc-console-routing.out" 2>&1; then

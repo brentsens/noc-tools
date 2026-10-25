@@ -1,632 +1,410 @@
-# NOC Tools
+# SESami NOC Automation Toolkit
 
-WSL Ubuntu automation toolkit for NOC shift setup, Jira-backed ticket tracking, Datadog investigations, system checks, handovers, controlled email delivery, deployment, and rollback.
-
-> **Safety:** Keep credentials, tokens, customer data, Jira records, Datadog evidence, shift notes, handovers, and production operational data out of this repository.
-
-## Included tools
-
-| Tool | Purpose |
-|---|---|
-| `noc-start` | Creates/verifies the shift workspace and displays shift readiness |
-| `tix` | Tracks local Jira-backed tickets using Atlas |
-| `noc-inv` | Creates and validates handover-ready summaries from final Datadog Notebooks |
-| `noc-status` | Read-only operational status, ticket review, investigation, and handover overview |
-| `noc-doctor` | Read-only automation health checks |
-| `noc-test` | Isolated regression suite using synthetic data and mocks |
-| `noc-handover` | Generates the next-shift handover |
-| `noc-end` | Runs the controlled end-of-shift workflow and optional M365 delivery |
-| `noc-install` | Validates and deploys committed tools to `~/.local/bin` |
-| `noc-rollback` | Restores live tools from deployment backups |
-
-## Architecture
-
-```text
-Jira -> Atlas -> tix ------------------------+
-                                             |
-Datadog -> Bits AI -> final Notebook         |
-                         -> noc-inv ----------+--> noc-handover
-                                             |         |
-shift-notes.md ------------------------------+         v
-                                                   noc-end
-                                                      |
-                                               review + M365 send
-```
-
-Operating boundaries:
-
-- Jira is authoritative for Jira-owned ticket fields.
-- Datadog is authoritative for monitor and incident evidence.
-- Atlas performs deterministic Jira reads for `tix`.
-- NOC-owned ticket fields remain separate from Jira-owned fields.
-- AI-generated investigation records are validated before entering the handover path.
-- Ticket closure, incident closure, impact, severity, root cause, deployment, and final email delivery remain human-controlled.
-
----
-
-# Fresh WSL Setup
-
-## 1. Base packages
-
-```bash
-sudo apt update
-sudo apt install -y git jq build-essential procps curl file
-```
-
-## 2. Homebrew
-
-Official documentation: https://docs.brew.sh/Homebrew-on-Linux
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-## 3. Atlas
-
-Authoritative project/setup: https://github.com/masonhuemmer/atlas
-
-> Follow the Atlas repository for current installation, authentication, site configuration, token management, upgrades, and troubleshooting.
-
-```bash
-brew tap masonhuemmer/atlas https://github.com/masonhuemmer/atlas
-brew install masonhuemmer/atlas/atlas
-```
-
-Authenticate as documented upstream and test a read-only lookup:
-
-```bash
-atlas auth status
-atlas jira get NOC-###
-```
-
-## 4. GitHub Copilot CLI and Datadog MCP
-
-Copilot CLI installation: https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli
-
-```bash
-brew install --cask copilot-cli
-copilot --version
-copilot
-```
-
-Datadog MCP setup: https://docs.datadoghq.com/mcp_server/setup/?tab=copilotcli
-
-```bash
-copilot plugin install datadog@awesome-copilot
-```
-
-Inside Copilot CLI:
-
-```text
-/ddsetup
-/ddtoolsets
-```
-
-Select the correct Datadog site and complete OAuth authentication. Keep the integration read-oriented for `noc-inv` and optional handover retrieval unless additional write access is explicitly approved.
-
-## 5. M365 CLI and Copilot skills
-
-**Authoritative project/setup:** https://github.com/masonhuemmer/m365
-
-> Use `masonhuemmer/m365` as the source of truth for installation, Entra configuration, authentication, supported commands, upgrades, skills, and troubleshooting.
-
-Homebrew is the primary installation method used by this environment:
-
-```bash
-brew tap masonhuemmer/tap
-brew install m365
-m365 --version
-```
-
-Authenticate in a human terminal:
-
-```bash
-m365 auth login
-m365 auth status
-```
-
-Add the repository's M365 skills to Copilot CLI:
-
-```bash
-git clone https://github.com/masonhuemmer/m365
-cd m365
-
-find ./skills -mindepth 2 -maxdepth 2 -name SKILL.md -print0 |
-while IFS= read -r -d '' file; do
-  copilot skill add "$(dirname "$file")"
-done
-```
-
-Keep the external M365 repository outside `~/code/noc-tools`.
-
-## 6. Herdr (optional)
-
-Official documentation: https://herdr.dev/docs/install/
-
-```bash
-brew install herdr
-```
-
-## 7. Clone and deploy
-
-```bash
-mkdir -p ~/code
-cd ~/code
-git clone https://github.com/brentsens/noc-tools.git
-cd noc-tools
-
-./noc-test
-./noc-install
-noc-doctor --deep
-```
-
-Runtime data stays under `~/noc`. Live commands are deployed to `~/.local/bin`.
-
----
-
-# Normal Workflow
-
-## Start of shift
-
-```bash
-noc-start
-```
-
-`noc-start` now:
-
-- creates or verifies the current shift workspace
-- preserves existing shift notes
-- validates required tools
-- checks M365 authentication
-- displays `noc-status` readiness
-- shows open tickets, review items, investigations, handover state, and dependencies
-- ends with `SHIFT READY` or `SHIFT READY WITH REVIEW ITEMS`
-
-Optional arguments:
-
-```bash
-noc-start --check-dd
-noc-start --no-copilot
-```
-
-`--check-dd` performs the optional read-only Datadog monitor check. `--no-copilot` returns to the shell instead of launching Copilot CLI.
-
-## Ticket work
-
-Add or update tickets:
-
-```bash
-tix add NOC-###
-tix update NOC-###
-tix show NOC-###
-tix list
-```
-
-Refresh one ticket:
-
-```bash
-tix sync NOC-###
-```
-
-Refresh all locally open tickets:
-
-```bash
-tix sync --all
-```
-
-Bulk sync behavior:
-
-- discovers valid JSON records under `~/noc/tickets/open/`
-- retrieves Jira-owned fields through Atlas
-- reports `UNCHANGED`, `CHANGED`, or `FAILED`
-- displays exact Jira differences for changed tickets
-- requires individual approval before applying each change
-- preserves Environment, Next Action, NOC Notes, and the created timestamp
-- isolates Atlas failures so remaining tickets continue
-- keeps Jira `Done` tickets locally open until `tix close` is explicitly run
-
-`tix sync --all` never writes back to Jira.
-
-## Datadog investigation
-
-Use `noc-inv` only after the Datadog Notebook is final:
-
-```text
-Bits AI investigation
-  -> Datadog Notebook
-  -> M365 validation
-  -> NOC contradiction review
-  -> update/finalize Notebook
-  -> noc-inv
-```
-
-Typical use:
-
-```bash
-noc-inv
-noc-inv investigation-name "DATADOG_NOTEBOOK_URL"
-noc-inv --open investigation-name
-```
-
-`noc-inv` asks Copilot CLI and Datadog MCP to create `investigation.md` from the final Notebook. It then validates its own generated output:
-
-- required metadata exists
-- all expected headings exist
-- Summary, Confirmed Findings, Current Status, and Handover Summary contain text
-- the final Datadog Notebook URL is preserved
-
-Valid output is added to shift notes for handover use. Malformed output is saved for review but withheld from shift notes.
-
-## End of shift
-
-```bash
-noc-end
-```
-
-`noc-end` orchestrates:
-
-```text
-tix sync --all
-  -> noc-status
-  -> review gate
-  -> noc-doctor --deep
-  -> readiness summary
-  -> noc-handover
-  -> human review
-  -> optional M365 preview/send
-```
-
-Supported date options:
-
-```bash
-noc-end --yesterday
-noc-end --date YYYY-MM-DD
-noc-end --skip-sync
-noc-end --date YYYY-MM-DD --skip-sync
-```
-
-`--skip-sync` is intended for cases where Atlas/Jira is unavailable or Jira freshness was already reviewed. It is shown clearly in the readiness summary.
-
-Review and health behavior:
-
-- Status review items default to **Stop and review**.
-- `noc-doctor` failures default to **Stop and review**.
-- Intentional doctor warnings may continue as `HEALTHY WITH WARNINGS`.
-- An existing handover is never overwritten automatically.
-- A new handover is generated only after confirmation.
-
-## Controlled handover delivery
-
-When a handover exists, `noc-end` offers:
-
-```text
-1) Send to myself
-2) Send to another email address
-3) Do not send
-```
-
-Delivery controls:
-
-- option 1 uses the signed-in M365 mailbox through `--note-to-self`
-- option 2 validates the supplied email address and uses `--to`
-- option 3 is the default and sends nothing
-- the handover is rendered from Markdown using `--format md`
-- `m365 mail send --preview` displays the final recipient, subject, and rendered message without sending
-- a second explicit `y/N` confirmation is required for the real send
-- canceled or failed sends do not alter the handover file
-
-The final subject format is:
-
-```text
-NOC Shift Handover - MM/DD/YYYY
-```
-
----
-
-# Command Reference
-
-## `noc-start`
-
-```bash
-noc-start [--check-dd] [--no-copilot]
-```
-
-| Argument | Purpose |
-|---|---|
-| none | Prepare workspace, show readiness, then launch Copilot |
-| `--check-dd` | Run optional read-only Datadog monitor check |
-| `--no-copilot` | Return to shell instead of launching Copilot |
-
-## `noc-status`
-
-```bash
-noc-status [--yesterday | --date YYYY-MM-DD]
-```
-
-## `noc-doctor`
-
-```bash
-noc-doctor [--deep] [--date YYYY-MM-DD]
-```
-
-## `noc-test`
-
-```bash
-noc-test [--keep]
-```
-
-`noc-test` runs isolated synthetic coverage for ticket add/sync safety, bulk sync, Atlas failures, status read-only behavior, Confluence handover carry-through, investigation-output validation, and `noc-end` orchestration. Test-specific mocks must never overwrite repository source scripts.
-
-## `noc-inv`
-
-```bash
-noc-inv
-noc-inv NAME DATADOG_NOTEBOOK_URL
-noc-inv --date YYYY-MM-DD NAME DATADOG_NOTEBOOK_URL
-noc-inv --open NAME
-```
-
-## `noc-handover`
-
-```bash
-noc-handover [--dd] [--send-self] [--force] [--yesterday | --date YYYY-MM-DD]
-```
-
-`noc-end` is now the preferred end-of-shift entry point. Direct `noc-handover` remains available for focused generation or recovery.
-
-## `noc-end`
-
-```bash
-noc-end [--yesterday | --date YYYY-MM-DD] [--skip-sync]
-```
-
-| Argument | Purpose |
-|---|---|
-| none | Run the controlled end-of-shift workflow using the current/default shift date |
-| `--yesterday` | Use the previous calendar day's shift |
-| `--date YYYY-MM-DD` | Use a specific shift date |
-| `--skip-sync` | Skip `tix sync --all` and clearly record that Jira freshness was skipped |
-| `-h`, `--help` | Show command help |
-
-`noc-end` never force-overwrites an existing handover and never emails without preview plus explicit confirmation.
-
-## `tix`
-
-```bash
-tix COMMAND [ARGUMENTS]
-```
-
-| Command | Arguments | Purpose |
-|---|---|---|
-| `add` | `TICKET_ID` | Add through Atlas, with manual fallback |
-| `list` | none | List locally open JSON tickets |
-| `show` | `TICKET_ID` | Show one ticket record |
-| `update` | `TICKET_ID` | Update NOC-owned fields |
-| `sync` | `TICKET_ID` | Preview and refresh Jira-owned fields |
-| `sync` | `--all` | Check all open tickets and individually approve changed Jira fields |
-| `history` | `[TICKET_ID]` | Show all history or filter by ticket |
-| `close` | `TICKET_ID` | Explicitly move a locally tracked ticket to closed |
-| `migrate` | none | Migrate legacy TSV tickets into JSON with backup |
-
-## `noc-install`
-
-```bash
-./noc-install
-```
-
-The installer requires a clean Git tree, runs syntax and regression validation, backs up changed live tools, deploys changed tools only, and runs deep health checks.
-
-## `noc-rollback`
-
-```bash
-./noc-rollback [--list | latest | BACKUP_DIRECTORY]
-```
-
----
-
-# Source, Deployment, and Recovery
-
-Make changes in the Git source repository, not directly in `~/.local/bin`:
-
-```bash
-cd ~/code/noc-tools
-
-git diff
-./noc-test
-
-git add <files>
-git commit -m "Describe the change"
-git push
-
-./noc-install
-noc-doctor --deep
-```
-
-`git push` does not deploy live tools. `noc-install` is the deliberate deployment gate.
-
-List and restore deployment backups:
-
-```bash
-./noc-rollback --list
-./noc-rollback latest
-```
-
-# Continuous Integration
-
-This repository uses GitHub Actions to validate changes pushed to `main` and pull requests targeting `main`.
-
-Workflow:
-
-```text
-.github/workflows/noc-ci.yaml
-```
-
-## CI Pipeline
-
-The workflow runs two jobs.
-
-### 1. Bash Syntax Validation
-
-GitHub Actions validates the shell syntax of the NOC automation scripts using:
-
-```bash
-bash -n
-```
-
-The CI checks:
-
-- `tix`
-- `noc-start`
-- `noc-status`
-- `noc-doctor`
-- `noc-test`
-- `noc-inv`
-- `noc-handover`
-- `noc-end`
-- `noc-install`
-- `noc-rollback`
-
-A syntax failure stops the pipeline before regression testing.
-
-### 2. Isolated Regression Testing
-
-After syntax validation passes, GitHub Actions runs:
-
-```bash
-./noc-test
-```
-
-The regression suite uses synthetic data, temporary directories, and mocked external services.
-
-It validates behaviors including:
-
-- Jira ticket add and synchronization safety
-- bulk `tix sync --all`
-- preservation of NOC-owned ticket fields
-- Atlas failure isolation
-- Jira `Done` tickets remaining locally open
-- read-only `noc-status`
-- handover overwrite protection
-- Confluence documentation carry-through
-- `noc-inv` generated-record validation
-- `noc-end` orchestration
-- M365 handover preview and delivery controls
-- source-file integrity during testing
-
-## CI Security Boundary
-
-GitHub Actions does not receive production credentials or operational data.
-
-CI does not have access to:
-
-- Jira credentials
-- Atlas authentication
-- Datadog credentials
-- Microsoft 365 credentials
-- production `~/noc` data
-- production deployment credentials
-
-Atlas, Copilot, Datadog-related behavior, and M365 email delivery are mocked where required by the regression suite.
-
-No real Jira changes, Datadog changes, production ticket changes, or emails should occur during CI.
-
-## Deployment Boundary
-
-A successful GitHub Actions run validates the source code but does not deploy it.
-
-Production deployment remains a deliberate local action:
-
-```bash
-cd ~/code/noc-tools
-
-git pull
-./noc-test
-./noc-install
-noc-doctor --deep
-```
-
-The deployment workflow is:
-
-```text
-Code change
-    ↓
-Local regression tests
-    ↓
-Git commit / push
-    ↓
-GitHub Actions
-    ├── Bash syntax validation
-    └── Isolated regression suite
-    ↓
-CI green
-    ↓
-Manual noc-install
-    ↓
-Production
-```
-
-GitHub Actions is the validation gate.
-
-`noc-install` remains the production deployment gate.
-
-## Regression Philosophy
-
-Real operational failures should become permanent regression tests whenever practical.
-
-The workflow is:
-
-```text
-Real shift issue
-    ↓
-Reproduce with synthetic data
-    ↓
-Add regression test
-    ↓
-Verify failure
-    ↓
-Fix code
-    ↓
-Verify regression suite passes
-    ↓
-Commit and push
-    ↓
-GitHub Actions validates
-    ↓
-Controlled deployment
-```
-
-The regression suite must never modify repository source files, production `~/noc` data, Jira, Datadog, or Microsoft 365.
-
-Source-integrity checks protect the core scripts from accidental modification by the test harness.
-
-# NOC Console
-
-`noc-console` provides the primary interactive interface for the NOC automation toolkit.
+A WSL-based automation toolkit for daily NOC operations built around a single interactive interface:
 
 ```bash
 noc-console
 ```
 
-You can also view a previous shift:
+The console provides one place for:
+
+- shift startup and readiness
+- shift-note viewing and structured note entry
+- Jira-backed ticket management
+- Datadog investigation documentation
+- AI-assisted shift analysis
+- operational health checks
+- end-of-shift readiness
+- handover generation
+- Microsoft 365 email preview and controlled delivery
+- regression testing
+
+Normal shift operations should be performed through `noc-console`.
+
+The individual scripts remain available for troubleshooting, development, recovery, and targeted operations.
+
+---
+
+# Design Principles
+
+The toolkit follows several operational rules.
+
+## Source systems remain authoritative
+
+- Jira provides Jira-owned ticket state.
+- Datadog provides monitoring and investigation evidence.
+- NOC-owned ticket fields remain separate from Jira-owned fields.
+- Local automation does not write changes back to Jira or Datadog unless explicitly designed and approved.
+
+## Automation removes repetitive work
+
+Automation handles collection, formatting, validation, synchronization, and orchestration.
+
+It does not make incident-management decisions.
+
+## AI assists rather than controls
+
+AI may:
+
+- analyze
+- summarize
+- identify follow-ups
+- review wording
+- highlight inconsistencies
+
+AI does not silently modify operational records.
+
+## Human approval remains required
+
+Human approval remains part of consequential actions such as:
+
+- applying changed Jira-owned fields to local records
+- closing locally tracked tickets
+- determining operational next actions
+- generating the final handover
+- sending the final handover email
+- production deployment
+
+## Everything important is testable and recoverable
+
+- Git is the source-control layer.
+- `noc-test` provides isolated regression testing.
+- GitHub Actions validates pushed code.
+- `noc-install` controls production deployment.
+- `noc-rollback` provides deployment recovery.
+
+---
+
+# Architecture
+
+```text
+                         noc-console
+                              │
+       ┌──────────────────────┼──────────────────────┐
+       │                      │                      │
+       ↓                      ↓                      ↓
+  Shift Notes              Tickets             Investigations
+       │                      │                      │
+       │                     tix                  noc-inv
+       │                      │                      │
+       │                    Atlas          Copilot + Datadog MCP
+       │                      │                      │
+       └──────────────────────┼──────────────────────┘
+                              │
+                              ↓
+                         AI Actions
+                              │
+                    Temporary Context Bundle
+                              │
+                              ↓
+                         Copilot CLI
+                              │
+                              ↓
+                       reports/ai-*.md
+                              │
+                              ↓
+                           noc-end
+                              │
+                              ↓
+                        noc-handover
+                              │
+                              ↓
+                         M365 Preview
+                              │
+                              ↓
+                       Human Approval
+                              │
+                              ↓
+                            Email
+```
+
+---
+
+# Fresh WSL Setup
+
+## 1. Install base packages
+
+```bash
+sudo apt update
+
+sudo apt install -y \
+  git \
+  jq \
+  build-essential \
+  procps \
+  curl \
+  file
+```
+
+---
+
+# External Dependencies
+
+Several components used by `noc-tools` are maintained independently.
+
+Always use their upstream documentation for current installation, authentication, configuration, upgrades, permissions, and troubleshooting.
+
+| Dependency | Authoritative Setup |
+|---|---|
+| Atlas | https://github.com/masonhuemmer/atlas |
+| Microsoft 365 CLI | https://github.com/masonhuemmer/m365 |
+| Datadog MCP Server | https://docs.datadoghq.com/mcp_server/setup/?tab=copilotcli |
+
+This repository documents how those tools participate in the NOC workflow.
+
+It does not replace their authoritative setup documentation.
+
+---
+
+# Homebrew
+
+Several toolkit dependencies are installed or managed through Homebrew for Linux.
+
+Follow the official Homebrew-on-Linux installation instructions.
+
+Typical installation:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Configure the shell:
+
+```bash
+eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+
+echo 'eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"' >> ~/.bashrc
+
+source ~/.bashrc
+```
+
+Verify:
+
+```bash
+brew --version
+```
+
+---
+
+# Atlas Setup
+
+`tix` uses Atlas as its Jira access layer.
+
+Atlas is maintained separately from `noc-tools`.
+
+For current installation, authentication, Jira configuration, site configuration, upgrades, command syntax, and troubleshooting, refer to:
+
+**Atlas**
+
+https://github.com/masonhuemmer/atlas
+
+> Do not rely on copied Atlas installation instructions in this repository. The Atlas repository is the authoritative setup source.
+
+After completing the Atlas setup, verify it from a normal WSL terminal:
+
+```bash
+atlas --version
+atlas auth status
+```
+
+Test a read-only Jira lookup:
+
+```bash
+atlas jira get NOC-###
+```
+
+`noc-tools` expects Atlas to:
+
+- be available in `PATH`
+- be correctly configured for Jira
+- have a valid authenticated session
+
+Atlas is used for Jira retrieval by `tix`.
+
+`tix` does not write changes back to Jira.
+
+---
+
+# GitHub Copilot CLI Setup
+
+Install GitHub Copilot CLI using the current GitHub-supported setup method.
+
+Verify:
+
+```bash
+copilot --version
+```
+
+Interactive use:
+
+```bash
+copilot
+```
+
+Copilot CLI is used by the toolkit for:
+
+- Datadog Notebook processing
+- investigation documentation
+- shift analysis
+- shift summarization
+- follow-up identification
+- handover review
+
+The toolkit also uses non-interactive Copilot execution for specific read-only AI tasks.
+
+---
+
+# Datadog MCP Setup
+
+`noc-inv` uses GitHub Copilot CLI with the Datadog MCP Server.
+
+Datadog maintains the MCP configuration separately from this repository.
+
+For current Copilot CLI MCP installation, Datadog-site selection, authentication, permissions, available toolsets, and troubleshooting, refer to:
+
+**Set Up the Datadog MCP Server**
+
+https://docs.datadoghq.com/mcp_server/setup/?tab=copilotcli
+
+> The Datadog documentation is the authoritative source for MCP configuration. `noc-tools` does not own or manage Datadog MCP configuration.
+
+Complete the Datadog MCP setup before using the Investigation workflow inside `noc-console`.
+
+The integration should support read-oriented retrieval of Datadog Notebook information and supporting Datadog evidence.
+
+Datadog remains the source of truth for monitor and incident evidence.
+
+---
+
+# Microsoft 365 CLI Setup
+
+`noc-tools` uses the M365 CLI for:
+
+- Microsoft 365 authentication checks
+- handover email preview
+- sending a handover to the authenticated mailbox
+- sending a handover to an explicitly entered recipient
+
+M365 is maintained independently of this repository.
+
+For current installation, Entra configuration, application permissions, authentication, upgrades, mail commands, and troubleshooting, refer to:
+
+**Microsoft 365 CLI**
+
+https://github.com/masonhuemmer/m365
+
+> The M365 repository is the authoritative source for M365 setup. Do not rely on copied installation or authentication instructions in this repository.
+
+After completing the M365 setup, authenticate from a normal terminal:
+
+```bash
+m365 auth login
+```
+
+Verify:
+
+```bash
+m365 auth status
+```
+
+The session should be usable before beginning the NOC workflow.
+
+The handover workflow always previews an email before sending and requires explicit confirmation before the actual send.
+
+---
+
+# Clone the NOC Toolkit
+
+```bash
+mkdir -p ~/code
+
+cd ~/code
+
+git clone https://github.com/brentsens/noc-tools.git
+
+cd noc-tools
+```
+
+---
+
+# Initial Validation
+
+Before installing the toolkit:
+
+```bash
+./noc-test
+```
+
+Required result:
+
+```text
+Failed:  0
+Skipped: 0
+Status:  PASSED
+```
+
+Deploy:
+
+```bash
+./noc-install
+```
+
+Validate the installed environment:
+
+```bash
+noc-doctor --deep
+```
+
+Then launch:
+
+```bash
+noc-console
+```
+
+After installation, normal NOC operations should be performed through `noc-console`.
+
+---
+
+# NOC Console
+
+The primary operational command is:
+
+```bash
+noc-console
+```
+
+Historical shifts can be selected:
 
 ```bash
 noc-console --yesterday
+```
+
+or:
+
+```bash
 noc-console --date YYYY-MM-DD
 ```
 
-For terminals or captured output where ANSI colors are not wanted:
+Disable terminal colors when required:
 
 ```bash
 noc-console --no-color
 ```
 
-## SES-Themed Interface
+Color output is automatically disabled when console output is redirected or captured by regression tests.
 
-The console uses an SES-style terminal theme with orange branding, cyan actions, green healthy states, yellow review states, and red errors.
+---
+
+# SES-Style Console Interface
+
+The console uses an SES-style terminal theme:
+
+- orange for primary headings
+- cyan for actions
+- green for healthy states
+- yellow for pending or review states
+- red for failures
+- gray for secondary actions
 
 Example:
 
@@ -638,7 +416,7 @@ Example:
 
 SHIFT OVERVIEW
 ──────────────────────────────────────────────────────────────
-  Shift:          2026-10-22
+  Shift:          2026-10-24
   Status:         ● READY
 
 OPERATIONS
@@ -646,94 +424,116 @@ OPERATIONS
   Open Jira:      5
   Investigations: 1
   Needs Review:   NO
-  Handover:       CREATED
+  Handover:       PENDING
 
-SHIFT OPERATIONS
+SHIFT WORK
 ──────────────────────────────────────────────────────────────
-  [1]  Start Shift
-  [2]  View Status
-  [3]  View Shift Notes
-  [4]  Sync Jira
-  [5]  Investigations
+  [1]   Start Shift
+  [2]   View Shift Notes
+  [3]   Add Shift Note
+  [4]   Tickets
+  [5]   Investigations
+  [6]   AI Actions
 
 SHIFT CONTROL
 ──────────────────────────────────────────────────────────────
-  [6]  End Shift
-  [7]  Health Check
+  [7]   View Status
+  [8]   End Shift
 
 SYSTEM
 ──────────────────────────────────────────────────────────────
-  [8]  Regression Tests
-  [9]  Exit
+  [9]   Health Check
+  [10]  Regression Tests
+  [11]  Exit
 ```
 
-## Dashboard
+---
 
-The dashboard is read-only and displays the state of the selected shift.
+# Dashboard
 
-It shows:
+The dashboard displays local operational state for the selected shift.
 
-- selected shift date
-- locally tracked open Jira tickets
-- reviewed investigations
-- whether local tickets require review
-- whether the shift handover has been created
+It includes:
 
-The dashboard does not contact Jira directly.
+```text
+Shift
+Status
+Open Jira
+Investigations
+Needs Review
+Handover
+```
 
-Use:
+The dashboard is read-only.
+
+`Open Jira` represents locally tracked open Jira records.
+
+Use the **Tickets** workflow when Jira freshness needs to be checked.
+
+---
+
+# 1. Start Shift
+
+From the console:
+
+```text
+[1] Start Shift
+```
+
+The console runs:
 
 ```bash
-tix sync --all
+noc-start --no-copilot
 ```
 
-or console option `4` when Jira freshness needs to be checked.
+This keeps `noc-console` as the persistent shift workspace rather than replacing it with an interactive Copilot process.
 
-## Console Actions
+Start Shift:
 
-### 1. Start Shift
+- creates or verifies the daily shift directory
+- creates `shift-notes.md` when needed
+- preserves existing shift notes
+- creates investigation, report, and handover directories
+- validates required tools
+- checks Microsoft 365 authentication
+- checks Kubernetes context when available
+- displays shift readiness
 
-Runs:
+Control then returns to `noc-console`.
 
-```bash
-noc-start
+Interactive Copilot remains available through **AI Actions**.
+
+---
+
+# 2. View Shift Notes
+
+From the console:
+
+```text
+[2] View Shift Notes
 ```
 
-This initializes the shift workspace, performs startup readiness checks, and launches Copilot CLI for the normal operational workflow and shift-note work.
-
-### 2. View Status
-
-Runs:
-
-```bash
-noc-status --date YYYY-MM-DD
-```
-
-The selected console date is passed automatically.
-
-### 3. View Shift Notes
-
-Displays:
+The console dynamically reads:
 
 ```text
 ~/noc/YYYY-MM-DD/shift-notes.md
 ```
 
-The path is dynamically selected using the shift date currently loaded in the console.
+using the shift date selected in the console.
 
-For example:
+Example:
 
 ```bash
 noc-console --date 2026-10-22
 ```
 
-will display:
+reads:
 
 ```text
 ~/noc/2026-10-22/shift-notes.md
 ```
 
-If the file does not exist or is empty, the console reports:
+If no notes exist:
 
 ```text
 Shift notes not created yet.
@@ -741,138 +541,369 @@ Shift notes not created yet.
 
 Viewing shift notes is read-only.
 
-### 4. Sync Jira
+---
 
-Runs:
+# 3. Add Shift Note
+
+From the console:
+
+```text
+[3] Add Shift Note
+```
+
+The structured note-entry menu includes:
+
+```text
+ADD SHIFT NOTE
+──────────────────────────────────────────────────────────────
+  [1] Open Ticket Update
+  [2] Active Alert / Investigation
+  [3] Salesforce Ticket
+  [4] Escalation
+  [5] Change / Monitor Update
+  [6] Documentation / Confluence
+  [7] General Handover Note
+  [8] Back
+```
+
+Notes are timestamped and appended to the appropriate `shift-notes.md` section.
+
+Example:
+
+```text
+Note:
+Added alerting tags to Platform Services latency monitor
+```
+
+becomes:
+
+```markdown
+## Changes / Monitor Updates
+
+- 21:34 Added alerting tags to Platform Services latency monitor
+```
+
+The console does not create missing shift notes.
+
+If the shift-notes file does not exist:
+
+```text
+Shift notes not created yet.
+Run Start Shift first.
+```
+
+`noc-start` remains responsible for creating the official template.
+
+---
+
+# 4. Tickets
+
+From the console:
+
+```text
+[4] Tickets
+```
+
+The submenu includes:
+
+```text
+TICKET ACTIONS
+──────────────────────────────────────────────────────────────
+  [1] List Open Tickets
+  [2] Add Ticket
+  [3] View Ticket
+  [4] Update NOC Fields
+  [5] Sync One Ticket
+  [6] Sync All Tickets
+  [7] Close Ticket
+  [8] Back
+```
+
+All ticket functionality is delegated to `tix`.
+
+---
+
+# Ticket Ownership Model
+
+Ticket records deliberately separate Jira-owned information from NOC-owned information.
+
+Jira-owned fields include:
+
+```text
+Summary
+Description
+Status
+Assignee
+Priority
+```
+
+NOC-owned fields include:
+
+```text
+Environment
+Next Action
+NOC Notes
+```
+
+Jira synchronization updates Jira-owned fields only.
+
+NOC-owned fields remain under NOC control.
+
+---
+
+# Bulk Jira Synchronization
+
+From the console:
+
+```text
+Tickets
+→ Sync All Tickets
+```
+
+This runs the equivalent of:
 
 ```bash
 tix sync --all
 ```
 
-The existing P1 safety controls remain active:
+Workflow:
 
-- Jira changes are previewed
+```text
+Discover Local Open Tickets
+        ↓
+Retrieve Jira State through Atlas
+        ↓
+Compare Jira-Owned Fields
+        ↓
+UNCHANGED / CHANGED / FAILED
+        ↓
+Preview Exact Differences
+        ↓
+Human Approval
+        ↓
+Update Jira-Owned Fields Only
+```
+
+Safety behavior:
+
 - each changed ticket requires individual approval
 - NOC-owned fields are preserved
-- failed Atlas reads do not modify the ticket
-- Jira `Done` does not automatically close the local ticket
+- Atlas failures preserve the existing ticket
+- one Atlas failure does not stop the remaining tickets
+- Jira `Done` does not automatically close the locally tracked ticket
+- closing a locally tracked ticket requires an explicit action
+- no Jira write-back is performed
 
-### 5. Investigations
+---
 
-Opens the investigation submenu:
+# 5. Investigations
+
+From the console:
 
 ```text
-╔══════════════════════════════════════════════════════════════╗
-║                    NOC INVESTIGATIONS                        ║
-╚══════════════════════════════════════════════════════════════╝
+[5] Investigations
+```
 
+The submenu includes:
+
+```text
 INVESTIGATION ACTIONS
 ──────────────────────────────────────────────────────────────
-  [1]  Create from Final Datadog Notebook
-  [2]  Open Existing Investigation
-  [3]  List Investigations
-  [4]  Back
+  [1] Create from Final Datadog Notebook
+  [2] Open Existing Investigation
+  [3] List Investigations
+  [4] Back
 ```
 
-Investigation processing remains delegated to:
+---
 
-```bash
+# Investigation Workflow
+
+The expected workflow is:
+
+```text
+Datadog Alert
+     ↓
+Bits AI Investigation
+     ↓
+Datadog Notebook
+     ↓
+M365 Validation
+     ↓
+Human Contradiction Review
+     ↓
+Update Datadog Notebook
+     ↓
+FINAL Datadog Notebook
+     ↓
+noc-console
+     ↓
+Investigations
+     ↓
+Create from Final Datadog Notebook
+     ↓
 noc-inv
+     ↓
+Copilot CLI + Datadog MCP
+     ↓
+investigation.md
+     ↓
+Generated Record Validation
 ```
 
-The console does not duplicate Datadog retrieval or investigation validation logic.
-
-### 6. End Shift
-
-Runs:
+The console delegates the operation to:
 
 ```bash
-noc-end --date YYYY-MM-DD
+noc-inv --date YYYY-MM-DD
 ```
 
-This preserves the complete controlled end-of-shift workflow:
+`noc-inv` asks for:
 
 ```text
-Jira freshness
-    ↓
-Shift status
-    ↓
-Review gate
-    ↓
-Automation health
-    ↓
-Readiness
-    ↓
-Handover generation
-    ↓
-Human review
-    ↓
-M365 preview
-    ↓
-Explicit send approval
+Investigation name
+FINAL Datadog Notebook URL
 ```
 
-### 7. Health Check
+Copilot CLI runs non-interactively.
 
-Runs:
+The console waits until `noc-inv` finishes.
 
-```bash
-noc-doctor --deep
-```
+Datadog MCP retrieves the final Notebook or directly supporting Datadog evidence.
 
-### 8. Regression Tests
+---
 
-Runs:
+# Investigation Output Validation
 
-```bash
-noc-test
-```
+`noc-inv` validates the generated `investigation.md`.
 
-The test suite remains isolated from production data and external service credentials.
+Validation protects against malformed AI/MCP output.
 
-### 9. Exit
+It checks:
 
-Closes the console without changing operational data.
+- required metadata
+- expected headings
+- Summary content
+- Confirmed Findings content
+- Current Status content
+- Handover Summary content
+- preservation of the final Datadog Notebook URL
 
-## Console Failure Handling
-
-`noc-console` is an interface layer over the existing NOC tools.
-
-If an underlying command fails, the console reports the exit code:
+Successful output:
 
 ```text
-[ERROR] noc-status failed with exit code 42.
+READY FOR HANDOVER
 ```
 
-The console itself remains available so the operator can return to the menu and choose the appropriate next action.
-
-## Design Boundary
-
-`noc-console` does not reimplement operational logic.
-
-Responsibilities remain with the existing tools:
+Malformed output:
 
 ```text
-noc-start      → shift initialization
-noc-status     → operational status
-tix            → ticket management and Jira synchronization
-noc-inv        → Datadog investigation documentation
-noc-end        → end-of-shift orchestration
-noc-doctor     → health validation
-noc-test       → regression testing
-noc-handover   → handover generation
+GENERATED RECORD NEEDS REVIEW
 ```
 
-This keeps the console lightweight while preserving the tested safety boundaries of the underlying automation.
+Malformed output remains available for review but is withheld from the automatic handover path.
 
-## Operating principle
+The validation checks the generated record.
+
+It does not re-decide whether the Datadog investigation itself is complete.
+
+Submitting the final Notebook is the human declaration that the investigation is ready for documentation.
+
+---
+
+# 6. AI Actions
+
+From the console:
 
 ```text
-Source systems provide facts
-        -> automation removes repetitive work
-        -> AI assists with investigation and documentation
-        -> the NOC Engineer reviews and decides
-        -> the next shift receives a concise operational handoff
+[6] AI Actions
 ```
 
+AI Actions provide supplemental analysis across operational information already captured during the selected shift.
 
+Typical actions include:
+
+```text
+AI ACTIONS
+──────────────────────────────────────────────────────────────
+  [1] Analyze Shift Notes / Entire Shift
+  [2] Summarize Current Shift
+  [3] Identify Follow-ups
+  [4] Review Handover Draft
+  [5] View Latest AI Report
+  [6] Open Copilot CLI
+  [7] Back
+```
+
+AI analysis is advisory.
+
+It does not become a new source of truth.
+
+---
+
+# AI Context Bundle
+
+For shift-wide analysis, `noc-console` builds a temporary read-only context snapshot.
+
+The context is assembled from:
+
+```text
+shift-notes.md
+       +
+locally open tix JSON
+       +
+validated investigation.md files
+       ↓
+temporary AI context bundle
+```
+
+This allows Copilot to analyze the full shift rather than relying only on manually entered shift notes.
+
+Ticket context is intentionally limited to useful fields such as:
+
+```text
+Ticket ID
+Summary
+Status
+Environment
+Next Action
+NOC Notes
+```
+
+Investigation context is intentionally limited to validated sections such as:
+
+```text
+Confirmed Findings
+Current Status
+Next Actions
+Handover Summary
+```
+
+---
+
+# Temporary AI Context Rule
+
+The context bundle is temporary working data.
+
+It is created using a temporary file, passed into the Copilot analysis, and deleted afterward.
+
+Conceptually:
+
+```text
+Operational Records
+        ↓
+Temporary Context
+        ↓
+copilot -p
+        ↓
+AI Report
+        ↓
+Delete Temporary Context
+```
+
+The temporary context is not stored as another operational record.
+
+The authoritative local records remain:
+
+```text
+shift-notes.md
+tix JSON

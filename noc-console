@@ -135,6 +135,654 @@ show_header() {
   echo
 }
 
+append_shift_note() {
+  local section="$1"
+  local note="$2"
+  local notes="$HOME/noc/$DAY/shift-notes.md"
+  local tmp timestamp
+
+  if [[ ! -s "$notes" ]]; then
+    echo
+    printf '%s[ERROR] Shift notes not created yet.%s\n' "$RED" "$RESET"
+    echo "Run Start Shift first."
+    return 1
+  fi
+
+  timestamp=$(date '+%H:%M')
+  tmp=$(mktemp)
+
+  awk \
+    -v heading="## $section" \
+    -v entry="- $timestamp $note" '
+    BEGIN {
+      inserted=0
+      found=0
+    }
+
+    $0 == heading {
+      found=1
+      print
+      next
+    }
+
+    found && !inserted && /^## / {
+      print entry
+      print ""
+      inserted=1
+    }
+
+    {
+      print
+    }
+
+    END {
+      if (found && !inserted) {
+        print entry
+      }
+    }
+  ' "$notes" > "$tmp"
+
+  if ! grep -Fq -- "$section" "$notes"; then
+    rm -f "$tmp"
+    echo
+    printf '%s[ERROR] Section not found: %s%s\n' "$RED" "$section" "$RESET"
+    return 1
+  fi
+
+  mv "$tmp" "$notes"
+
+  echo
+  printf '%s[OK]%s Added to %s\n' "$GREEN" "$RESET" "$section"
+}
+
+add_shift_note_menu() {
+  local note_choice section note
+
+  while true; do
+    clear
+
+    printf '%s%s' "$SES_ORANGE" "$BOLD"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                      ADD SHIFT NOTE                         ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    printf '%s' "$RESET"
+
+    echo
+    printf 'Shift: %s%s%s\n' "$WHITE" "$DAY" "$RESET"
+    echo
+
+    printf '%s%sNOTE TYPE%s\n' "$SES_CYAN" "$BOLD" "$RESET"
+    printf '%s\n' "──────────────────────────────────────────────────────────────"
+    printf '  %s[1]%s  Open Ticket Update\n' "$SES_CYAN" "$RESET"
+    printf '  %s[2]%s  Active Alert / Investigation\n' "$SES_CYAN" "$RESET"
+    printf '  %s[3]%s  Salesforce Ticket\n' "$SES_CYAN" "$RESET"
+    printf '  %s[4]%s  Escalation\n' "$SES_CYAN" "$RESET"
+    printf '  %s[5]%s  Change / Monitor Update\n' "$SES_CYAN" "$RESET"
+    printf '  %s[6]%s  Documentation / Confluence\n' "$SES_CYAN" "$RESET"
+    printf '  %s[7]%s  General Handover Note\n' "$SES_CYAN" "$RESET"
+    printf '  %s[8]%s  Back\n' "$GRAY" "$RESET"
+    echo
+
+    read -rp "Selection [1-8]: " note_choice
+
+    case "$note_choice" in
+      1)
+        section="Open Tickets"
+        ;;
+      2)
+        section="Active Alerts / Investigations"
+        ;;
+      3)
+        section="Salesforce Tickets"
+        ;;
+      4)
+        section="Escalations"
+        ;;
+      5)
+        section="Changes / Monitor Updates"
+        ;;
+      6)
+        section="Notes for Handover"
+        ;;
+      7)
+        section="Notes for Handover"
+        ;;
+      8)
+        return 0
+        ;;
+      *)
+        echo
+        printf '%sInvalid selection.%s\n' "$YELLOW" "$RESET"
+        sleep 1
+        continue
+        ;;
+    esac
+
+    echo
+    printf 'Section: %s%s%s\n' "$WHITE" "$section" "$RESET"
+    echo
+
+    read -rp "Note: " note
+
+    if [[ -z "$note" ]]; then
+      echo
+      printf '%s[ERROR] Note cannot be empty.%s\n' "$RED" "$RESET"
+      pause
+      continue
+    fi
+
+    append_shift_note "$section" "$note"
+    pause
+  done
+}
+
+build_ai_context() {
+  local bundle="$1"
+  local notes="$HOME/noc/$DAY/shift-notes.md"
+  local ticket_dir="$HOME/noc/tickets/open"
+  local investigation_root="$HOME/noc/$DAY/investigations"
+  local f
+
+  {
+    echo "# NOC AI Context - $DAY"
+    echo
+    echo "Generated from local read-only NOC records."
+    echo
+
+    echo "## SHIFT NOTES"
+    echo
+
+    if [[ -s "$notes" ]]; then
+      cat "$notes"
+    else
+      echo "No shift notes available."
+    fi
+
+    echo
+    echo "## OPEN JIRA TICKETS"
+    echo
+
+    shopt -s nullglob
+    local tickets=("$ticket_dir"/*.json)
+    shopt -u nullglob
+
+    if [[ ${#tickets[@]} -eq 0 ]]; then
+      echo "No locally tracked open Jira tickets."
+    else
+      for f in "${tickets[@]}"; do
+        jq -r '
+          "- Ticket: " + (.id // "Unknown") +
+          "\n  Summary: " + (.jira.summary // "[not provided]") +
+          "\n  Status: " + (.jira.status // "[not provided]") +
+          "\n  Environment: " + (.noc.environment // "[not provided]") +
+          "\n  Next Action: " + (.noc.next_action // "[not provided]") +
+          "\n  NOC Notes: " + (.noc.notes // "[none]") +
+          "\n"
+        ' "$f"
+      done
+    fi
+
+    echo
+    echo "## REVIEWED INVESTIGATIONS"
+    echo
+
+    shopt -s nullglob
+    local investigations=(
+      "$investigation_root"/*/investigation.md
+    )
+    shopt -u nullglob
+
+    if [[ ${#investigations[@]} -eq 0 ]]; then
+      echo "No reviewed investigations available."
+    else
+      for f in "${investigations[@]}"; do
+        echo "### $(basename "$(dirname "$f")")"
+        echo
+
+        awk '
+          /^## Confirmed Findings$/ {show=1}
+          /^## Current Status$/ {show=1}
+          /^## Next Actions$/ {show=1}
+          /^## Handover Summary$/ {show=1}
+
+          /^## / &&
+          $0 !~ /^## (Confirmed Findings|Current Status|Next Actions|Handover Summary)$/ {
+            show=0
+          }
+
+          show {print}
+        ' "$f"
+
+        echo
+      done
+    fi
+  } > "$bundle"
+}
+
+run_ai_report() {
+  local report_name="$1"
+  local task="$2"
+  local report_dir="$HOME/noc/$DAY/reports"
+  local report="$report_dir/$report_name"
+  local context
+
+  if ! command -v copilot >/dev/null 2>&1; then
+    echo
+    printf '%s[ERROR] Copilot CLI not found.%s\n' "$RED" "$RESET"
+    return 1
+  fi
+
+  mkdir -p "$report_dir"
+
+  context=$(mktemp)
+  build_ai_context "$context"
+
+  local prompt
+  prompt=$(cat <<EOF
+This is a READ-ONLY NOC analysis task.
+
+Shift date: $DAY
+
+Use ONLY the operational context supplied below.
+Do not modify files or external systems.
+Do not invent ticket states, owners, impact, root cause, deadlines,
+incident closure, or completed actions.
+
+TASK:
+$task
+
+OPERATIONAL CONTEXT:
+$(cat "$context")
+
+Return concise Markdown.
+EOF
+)
+
+  echo
+  printf '%sRunning Copilot analysis...%s\n' "$SES_CYAN" "$RESET"
+
+  if copilot -p "$prompt" > "$report" && [[ -s "$report" ]]; then
+    rm -f "$context"
+
+    echo
+    printf '%s[OK]%s AI report saved:\n' "$GREEN" "$RESET"
+    echo "  $report"
+    return 0
+  fi
+
+  rm -f "$context" "$report"
+
+  echo
+  printf '%s[ERROR] AI analysis failed. No report was saved.%s\n' \
+    "$RED" "$RESET"
+
+  return 1
+}
+
+ai_actions_menu() {
+  local ai_choice
+  local notes="$HOME/noc/$DAY/shift-notes.md"
+  local handover="$HOME/noc/$DAY/handover/handover-$DAY.md"
+  local report_dir="$HOME/noc/$DAY/reports"
+  local latest
+  local prompt
+
+  while true; do
+    clear
+
+    printf '%s%s' "$SES_ORANGE" "$BOLD"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                        AI ACTIONS                            ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    printf '%s' "$RESET"
+
+    echo
+    printf 'Shift: %s%s%s\n' "$WHITE" "$DAY" "$RESET"
+    echo
+
+    printf '%s%sREAD-ONLY AI ASSISTANCE%s\n' \
+      "$SES_CYAN" "$BOLD" "$RESET"
+
+    printf '%s\n' \
+      "──────────────────────────────────────────────────────────────"
+
+    printf '  %s[1]%s  Analyze Shift Notes\n' "$SES_CYAN" "$RESET"
+    printf '  %s[2]%s  Summarize Current Shift\n' "$SES_CYAN" "$RESET"
+    printf '  %s[3]%s  Identify Follow-ups\n' "$SES_CYAN" "$RESET"
+    printf '  %s[4]%s  Review Handover Draft\n' "$SES_CYAN" "$RESET"
+    printf '  %s[5]%s  View Latest AI Report\n' "$SES_CYAN" "$RESET"
+    printf '  %s[6]%s  Open Copilot CLI\n' "$SES_CYAN" "$RESET"
+    printf '  %s[7]%s  Back\n' "$GRAY" "$RESET"
+    echo
+
+    read -rp "Selection [1-7]: " ai_choice
+
+    case "$ai_choice" in
+      1)
+        if [[ ! -s "$notes" ]]; then
+          echo
+          printf '%sShift notes not created yet.%s\n' \
+            "$YELLOW" "$RESET"
+          pause
+          continue
+        fi
+
+        prompt="
+This is a READ-ONLY NOC shift analysis.
+
+Shift date: $DAY
+Shift notes file: $notes
+
+Read the shift notes below.
+
+$(cat "$notes")
+
+Analyze only the supplied shift notes.
+
+Identify:
+- important operational activity
+- unresolved work
+- open tickets mentioned
+- active investigations
+- escalations
+- monitoring changes
+- items that may need handover attention
+
+Do not modify files.
+Do not invent missing facts.
+Do not claim ticket, incident, or investigation closure unless explicitly documented.
+
+Return concise Markdown.
+"
+
+        run_ai_report "ai-shift-analysis.md" "$prompt"
+        pause
+        ;;
+
+      2)
+        if [[ ! -s "$notes" ]]; then
+          echo
+          printf '%sShift notes not created yet.%s\n' \
+            "$YELLOW" "$RESET"
+          pause
+          continue
+        fi
+
+        prompt="
+Create a concise READ-ONLY NOC shift summary for $DAY.
+
+Source:
+
+$(cat "$notes")
+
+Summarize:
+- major operational activity
+- ticket work
+- investigations
+- escalations
+- monitoring or configuration changes
+- items still in progress
+
+Use only supplied information.
+Do not invent conclusions or closure states.
+Return Markdown only.
+"
+
+        run_ai_report "ai-shift-summary.md" "$prompt"
+        pause
+        ;;
+
+      3)
+        if [[ ! -s "$notes" ]]; then
+          echo
+          printf '%sShift notes not created yet.%s\n' \
+            "$YELLOW" "$RESET"
+          pause
+          continue
+        fi
+
+        prompt="
+Review these NOC shift notes for $DAY:
+
+$(cat "$notes")
+
+Identify follow-ups that appear unresolved or should be checked before handover.
+
+For each follow-up provide:
+- item
+- why it appears unresolved
+- recommended human review
+
+Do not modify anything.
+Do not invent owners, deadlines, status, or closure.
+Return concise Markdown.
+"
+
+        run_ai_report "ai-followups.md" "$prompt"
+        pause
+        ;;
+
+      4)
+        if [[ ! -s "$handover" ]]; then
+          echo
+          printf '%sHandover not created yet.%s\n' \
+            "$YELLOW" "$RESET"
+          pause
+          continue
+        fi
+
+        prompt="
+Review this NOC handover draft for $DAY.
+
+$(cat "$handover")
+
+This is a READ-ONLY editorial and operational consistency review.
+
+Check for:
+- unclear wording
+- contradictory statements
+- missing next-shift actions
+- ticket references lacking useful context
+- unsupported closure claims
+- unnecessary repetition
+
+Do not rewrite or modify the handover.
+Do not invent missing operational facts.
+
+Return recommendations only in concise Markdown.
+"
+
+        run_ai_report "ai-handover-review.md" "$prompt"
+        pause
+        ;;
+
+      5)
+        echo
+
+        shopt -s nullglob
+        local reports=("$report_dir"/ai-*.md)
+        shopt -u nullglob
+
+        if [[ ${#reports[@]} -eq 0 ]]; then
+          printf '%sNo AI reports created yet.%s\n' \
+            "$YELLOW" "$RESET"
+          pause
+          continue
+        fi
+
+        latest=$(
+          ls -1t "${reports[@]}" 2>/dev/null |
+          head -1
+        )
+
+        printf '%s%sLATEST AI REPORT%s\n' \
+          "$SES_CYAN" "$BOLD" "$RESET"
+
+        echo "──────────────────────────────────────────────────────────────"
+        echo "File: $latest"
+        echo
+
+        cat "$latest"
+
+        pause
+        ;;
+
+      6)
+        if ! command -v copilot >/dev/null 2>&1; then
+          echo
+          printf '%s[ERROR] Copilot CLI not found.%s\n' \
+            "$RED" "$RESET"
+          pause
+          continue
+        fi
+
+        echo
+        printf '%sOpening Copilot CLI...%s\n' \
+          "$SES_CYAN" "$RESET"
+        echo
+
+        copilot
+
+        pause
+        ;;
+
+      7)
+        return 0
+        ;;
+
+      *)
+        echo
+        printf '%sInvalid selection.%s\n' "$YELLOW" "$RESET"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
+tickets_menu() {
+  local ticket_choice ticket_id
+
+  while true; do
+    clear
+
+    printf '%s%s' "$SES_ORANGE" "$BOLD"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                        NOC TICKETS                           ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    printf '%s' "$RESET"
+
+    echo
+    printf 'Shift: %s%s%s\n' "$WHITE" "$DAY" "$RESET"
+    echo
+
+    printf '%s%sTICKET ACTIONS%s\n' "$SES_CYAN" "$BOLD" "$RESET"
+    printf '%s\n' "──────────────────────────────────────────────────────────────"
+    printf '  %s[1]%s  List Open Tickets\n' "$SES_CYAN" "$RESET"
+    printf '  %s[2]%s  Add Ticket\n' "$SES_CYAN" "$RESET"
+    printf '  %s[3]%s  View Ticket\n' "$SES_CYAN" "$RESET"
+    printf '  %s[4]%s  Update NOC Fields\n' "$SES_CYAN" "$RESET"
+    printf '  %s[5]%s  Sync One Ticket\n' "$SES_CYAN" "$RESET"
+    printf '  %s[6]%s  Sync All Tickets\n' "$SES_CYAN" "$RESET"
+    printf '  %s[7]%s  Close Ticket\n' "$SES_CYAN" "$RESET"
+    printf '  %s[8]%s  Back\n' "$GRAY" "$RESET"
+    echo
+
+    read -rp "Selection [1-8]: " ticket_choice
+
+    case "$ticket_choice" in
+      1)
+        run_tool tix list
+        pause
+        ;;
+
+      2)
+        echo
+        read -rp "Ticket ID: " ticket_id
+
+        if [[ -z "$ticket_id" ]]; then
+          echo "[ERROR] Ticket ID is required."
+          pause
+          continue
+        fi
+
+        run_tool tix add "$ticket_id"
+        pause
+        ;;
+
+      3)
+        echo
+        read -rp "Ticket ID: " ticket_id
+
+        if [[ -z "$ticket_id" ]]; then
+          echo "[ERROR] Ticket ID is required."
+          pause
+          continue
+        fi
+
+        run_tool tix show "$ticket_id"
+        pause
+        ;;
+
+      4)
+        echo
+        read -rp "Ticket ID: " ticket_id
+
+        if [[ -z "$ticket_id" ]]; then
+          echo "[ERROR] Ticket ID is required."
+          pause
+          continue
+        fi
+
+        run_tool tix update "$ticket_id"
+        pause
+        ;;
+
+      5)
+        echo
+        read -rp "Ticket ID: " ticket_id
+
+        if [[ -z "$ticket_id" ]]; then
+          echo "[ERROR] Ticket ID is required."
+          pause
+          continue
+        fi
+
+        run_tool tix sync "$ticket_id"
+        pause
+        ;;
+
+      6)
+        run_tool tix sync --all
+        pause
+        ;;
+
+      7)
+        echo
+        read -rp "Ticket ID: " ticket_id
+
+        if [[ -z "$ticket_id" ]]; then
+          echo "[ERROR] Ticket ID is required."
+          pause
+          continue
+        fi
+
+        run_tool tix close "$ticket_id"
+        pause
+        ;;
+
+      8)
+        return 0
+        ;;
+
+      *)
+        echo
+        printf '%sInvalid selection.%s\n' "$YELLOW" "$RESET"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
 investigation_menu() {
   local inv_choice inv_dir inv_name inv
   local investigation_root="$HOME/noc/$DAY/investigations"
@@ -304,77 +952,87 @@ while true; do
   show_header
   show_dashboard
 
-  printf '%s%sSHIFT OPERATIONS%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
+  printf '%s%sSHIFT WORK%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
   printf '%s\n' "──────────────────────────────────────────────────────────────"
-  printf '  %s[1]%s  Start Shift\n' "$SES_CYAN" "$RESET"
-  printf '  %s[2]%s  View Status\n' "$SES_CYAN" "$RESET"
-  printf '  %s[3]%s  View Shift Notes\n' "$SES_CYAN" "$RESET"
-  printf '  %s[4]%s  Sync Jira\n' "$SES_CYAN" "$RESET"
-  printf '  %s[5]%s  Investigations\n' "$SES_CYAN" "$RESET"
+  printf '  %s[1]%s   Start Shift\n' "$SES_CYAN" "$RESET"
+  printf '  %s[2]%s   View Shift Notes\n' "$SES_CYAN" "$RESET"
+  printf '  %s[3]%s   Add Shift Note\n' "$SES_CYAN" "$RESET"
+  printf '  %s[4]%s   Tickets\n' "$SES_CYAN" "$RESET"
+  printf '  %s[5]%s   Investigations\n' "$SES_CYAN" "$RESET"
+  printf '  %s[6]%s   AI Actions\n' "$SES_CYAN" "$RESET"
   echo
 
   printf '%s%sSHIFT CONTROL%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
   printf '%s\n' "──────────────────────────────────────────────────────────────"
-  printf '  %s[6]%s  End Shift\n' "$SES_CYAN" "$RESET"
-  printf '  %s[7]%s  Health Check\n' "$SES_CYAN" "$RESET"
+  printf '  %s[7]%s   View Status\n' "$SES_CYAN" "$RESET"
+  printf '  %s[8]%s   End Shift\n' "$SES_CYAN" "$RESET"
   echo
 
   printf '%s%sSYSTEM%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
   printf '%s\n' "──────────────────────────────────────────────────────────────"
-  printf '  %s[8]%s  Regression Tests\n' "$SES_CYAN" "$RESET"
-  printf '  %s[9]%s  Exit\n' "$GRAY" "$RESET"
+  printf '  %s[9]%s   Health Check\n' "$SES_CYAN" "$RESET"
+  printf '  %s[10]%s  Regression Tests\n' "$SES_CYAN" "$RESET"
+  printf '  %s[11]%s  Exit\n' "$GRAY" "$RESET"
   echo
 
-  read -rp "Selection [1-9]: " choice
+  read -rp "Selection [1-11]: " choice
 
     case "$choice" in
-      1)
-        run_tool noc-start
-        ;;
+        1)
+          run_tool noc-start --no-copilot
+          pause
+          ;;
 
-      2)
-        run_tool noc-status --date "$DAY"
-        pause
-        ;;
+        2)
+          view_shift_notes
+          ;;
 
-      3)
-        view_shift_notes
-        ;;
+        3)
+          add_shift_note_menu
+          ;;
 
-      4)
-        run_tool tix sync --all
-        pause
-        ;;
+        4)
+          tickets_menu
+          ;;
 
-      5)
-        investigation_menu
-        ;;
+        5)
+          investigation_menu
+          ;;
 
-      6)
-        run_tool noc-end --date "$DAY"
-        pause
-        ;;
+        6)
+          ai_actions_menu
+          ;;
 
-      7)
-        run_tool noc-doctor --deep
-        pause
-        ;;
+        7)
+         run_tool noc-status --date "$DAY"
+         pause
+         ;;
 
-      8)
-        run_tool noc-test
-        pause
-        ;;
+        8)
+          run_tool noc-end --date "$DAY"
+          pause
+         ;;
 
-      9)
-        echo
-        printf '%sNOC Console closed.%s\n' "$GRAY" "$RESET"
-        exit 0
-        ;;
+        9)
+         run_tool noc-doctor --deep
+         pause
+         ;;
 
-      *)
-        echo
-        printf '%sInvalid selection.%s\n' "$YELLOW" "$RESET"
-        sleep 1
-        ;;
-  esac
+        10)
+         run_tool noc-test
+         pause
+         ;;
+
+        11)
+         echo
+         printf '%sNOC Console closed.%s\n' "$GRAY" "$RESET"
+         exit 0
+         ;;
+
+        *)
+         echo
+         printf '%sInvalid selection.%s\n' "$YELLOW" "$RESET"
+         sleep 1
+         ;;
+    esac
 done
