@@ -27,7 +27,7 @@ done
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 declare -A PROD
 
-for cmd in tix noc-start noc-status noc-inv noc-handover noc-end; do
+for cmd in tix noc-start noc-status noc-inv noc-handover noc-end noc-console; do
   if [[ -x "$SCRIPT_DIR/$cmd" ]]; then
     PROD[$cmd]="$SCRIPT_DIR/$cmd"
   else
@@ -46,6 +46,7 @@ SOURCE_FILES=(
   noc-inv
   noc-handover
   noc-end
+  noc-console
 )
 
 for src in "${SOURCE_FILES[@]}"; do
@@ -62,7 +63,7 @@ cleanup(){ if $KEEP; then echo "Test lab retained: $LAB"; else rm -rf "$LAB"; fi
 trap cleanup EXIT INT TERM
 
 # Link installed scripts into the isolated PATH. No test writes to production HOME.
-for cmd in tix noc-start noc-status noc-inv noc-handover noc-end; do
+for cmd in tix noc-start noc-status noc-inv noc-handover noc-end noc-console; do
   if [[ -n "${PROD[$cmd]}" ]]; then ln -s "${PROD[$cmd]}" "$MOCK_BIN/$cmd"; fi
 done
 
@@ -168,7 +169,7 @@ printf 'Production data path used: no\n'
 printf 'Test HOME: %s\n' "$HOME"
 
 printf '\n1. Installed Script Syntax\n'
-for cmd in tix noc-start noc-status noc-inv noc-handover noc-end; do
+for cmd in tix noc-start noc-status noc-inv noc-handover noc-end noc-console; do
   if [[ -z "${PROD[$cmd]}" ]]; then skip "$cmd not installed"; continue; fi
   if bash -n "${PROD[$cmd]}" >/dev/null 2>&1; then pass "$cmd syntax valid"; else fail "$cmd syntax invalid"; fi
 done
@@ -1360,6 +1361,96 @@ HANDOVER
     pass "approved self-send success was reported"
   else
     fail "approved self-send success message missing"
+  fi
+fi
+
+printf '\n26. noc-console Basic Routing\n'
+
+if [[ -z "${PROD[noc-console]:-}" ]]; then
+  skip "noc-console not available"
+else
+  CONSOLE_DAY="2026-10-22"
+  CONSOLE_BIN="$LAB/console-test-bin"
+  CONSOLE_CALLS="$LAB/console-calls.log"
+
+  mkdir -p "$CONSOLE_BIN"
+  : > "$CONSOLE_CALLS"
+
+  # Mock noc-status
+  cat > "$CONSOLE_BIN/noc-status" <<EOF
+#!/usr/bin/env bash
+echo "noc-status \$*" >> "$CONSOLE_CALLS"
+echo "MOCK NOC STATUS"
+exit 0
+EOF
+
+  # Mock noc-doctor
+  cat > "$CONSOLE_BIN/noc-doctor" <<EOF
+#!/usr/bin/env bash
+echo "noc-doctor \$*" >> "$CONSOLE_CALLS"
+echo "MOCK NOC DOCTOR"
+exit 0
+EOF
+
+  chmod +x \
+    "$CONSOLE_BIN/noc-status" \
+    "$CONSOLE_BIN/noc-doctor"
+
+  # Input:
+  # 2 -> View Status
+  # Enter -> return to console
+  # 6 -> Health Check
+  # Enter -> return to console
+  # 8 -> Exit
+  if printf '2\n\n6\n\n8\n' |
+     PATH="$CONSOLE_BIN:$MOCK_BIN:/usr/bin:/bin" \
+     noc-console --date "$CONSOLE_DAY" \
+     >"$LAB/noc-console-routing.out" 2>&1; then
+    pass "noc-console routing test completed"
+  else
+    fail "noc-console routing test failed"
+  fi
+
+  if grep -Fq "Shift:          $CONSOLE_DAY" \
+      "$LAB/noc-console-routing.out"; then
+    pass "noc-console displayed selected historical date"
+  else
+    fail "noc-console historical date missing"
+  fi
+
+  if grep -Fq "noc-status --date $CONSOLE_DAY" \
+      "$CONSOLE_CALLS"; then
+    pass "noc-console routed View Status with selected date"
+  else
+    fail "noc-console did not route View Status correctly"
+  fi
+
+  if grep -Fq "noc-doctor --deep" \
+      "$CONSOLE_CALLS"; then
+    pass "noc-console routed Health Check correctly"
+  else
+    fail "noc-console did not route Health Check correctly"
+  fi
+
+  if grep -Fq "[OK] noc-status completed." \
+      "$LAB/noc-console-routing.out"; then
+    pass "noc-console reported successful status command"
+  else
+    fail "noc-console status success message missing"
+  fi
+
+  if grep -Fq "[OK] noc-doctor completed." \
+      "$LAB/noc-console-routing.out"; then
+    pass "noc-console reported successful health command"
+  else
+    fail "noc-console health success message missing"
+  fi
+
+  if grep -Fq "NOC Console closed." \
+      "$LAB/noc-console-routing.out"; then
+    pass "noc-console exited cleanly"
+  else
+    fail "noc-console clean exit missing"
   fi
 fi
 

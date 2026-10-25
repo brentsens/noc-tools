@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# noc-console - interactive front end for the NOC automation toolkit
+
+set -uo pipefail
+
+DAY=""
+
+usage() {
+  cat <<'TXT'
+Usage:
+  noc-console
+  noc-console --yesterday
+  noc-console --date YYYY-MM-DD
+
+Options:
+  --yesterday        Use the previous calendar day's shift.
+  --date YYYY-MM-DD  Use a specific shift date.
+  -h, --help         Show this help.
+TXT
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yesterday)
+      DAY=$(date -d yesterday +%F)
+      ;;
+
+    --date)
+      [[ $# -ge 2 ]] || {
+        echo "ERROR: --date requires YYYY-MM-DD" >&2
+        exit 1
+      }
+
+      DAY="$2"
+      shift
+      ;;
+
+    -h|--help)
+      usage
+      exit 0
+      ;;
+
+    *)
+      echo "ERROR: Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+
+  shift
+done
+
+if [[ -z "$DAY" ]]; then
+  DAY=$(date +%F)
+fi
+
+date -d "$DAY" >/dev/null 2>&1 || {
+  echo "ERROR: Invalid date: $DAY" >&2
+  exit 1
+}
+
+pause() {
+  echo
+  read -rp "Press Enter to return to the NOC Console..." _
+}
+
+run_tool() {
+  local tool="$1"
+  local rc
+
+  shift
+
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo
+    echo "[ERROR] $tool not found."
+    return 127
+  fi
+
+  echo
+
+  "$tool" "$@"
+  rc=$?
+
+  echo
+
+  if [[ $rc -eq 0 ]]; then
+    echo "[OK] $tool completed."
+  else
+    echo "[ERROR] $tool failed with exit code $rc."
+  fi
+
+  return 0
+}
+
+investigation_menu() {
+  local inv_choice inv_dir inv_name
+  local investigation_root="$HOME/noc/$DAY/investigations"
+
+  while true; do
+    clear
+
+    echo "============================================================"
+    echo "NOC Investigation - $DAY"
+    echo "============================================================"
+    echo
+    echo "  1) Create investigation from final Notebook"
+    echo "  2) Open existing investigation"
+    echo "  3) List investigations"
+    echo "  4) Back"
+    echo
+
+    read -rp "Selection [1-4]: " inv_choice
+
+    case "$inv_choice" in
+      1)
+        run_tool noc-inv --date "$DAY"
+        pause
+        ;;
+
+      2)
+        echo
+        read -rp "Investigation name: " inv_name
+
+        if [[ -z "$inv_name" ]]; then
+          echo
+          echo "Investigation name is required."
+          pause
+          continue
+        fi
+
+        inv_dir="$investigation_root/$inv_name"
+
+        if [[ ! -f "$inv_dir/investigation.md" ]]; then
+          echo
+          echo "[ERROR] Investigation not found:"
+          echo "  $inv_dir/investigation.md"
+          pause
+          continue
+        fi
+
+        run_tool noc-inv --open "$inv_name"
+        pause
+        ;;
+
+      3)
+        echo
+
+        shopt -s nullglob
+        local investigations=("$investigation_root"/*/investigation.md)
+        shopt -u nullglob
+
+        if [[ ${#investigations[@]} -eq 0 ]]; then
+          echo "No investigations found for $DAY."
+        else
+          echo "Investigations for $DAY:"
+          echo
+
+          for inv in "${investigations[@]}"; do
+            printf '  - %s\n' "$(basename "$(dirname "$inv")")"
+          done
+        fi
+
+        pause
+        ;;
+
+      4)
+        return 0
+        ;;
+
+      *)
+        echo
+        echo "Invalid selection."
+        sleep 1
+        ;;
+    esac
+  done
+}
+
+show_dashboard() {
+  local open_count inv_count handover_state review_state f
+
+  shopt -s nullglob
+  local tickets=("$HOME/noc/tickets/open/"*.json)
+  local investigations=("$HOME/noc/$DAY/investigations/"*/investigation.md)
+  shopt -u nullglob
+
+  open_count=${#tickets[@]}
+  inv_count=${#investigations[@]}
+
+  if [[ -s "$HOME/noc/$DAY/handover/handover-$DAY.md" ]]; then
+    handover_state="Created"
+  else
+    handover_state="Not Created"
+  fi
+
+  review_state="No"
+
+  for f in "${tickets[@]}"; do
+    if [[ "$(jq -r '.jira.status // ""' "$f" 2>/dev/null)" =~ ^(Done|Closed|Resolved)$ ]]; then
+      review_state="Yes"
+      break
+    fi
+  done
+
+  echo "Shift:          $DAY"
+  printf 'Open Jira:      %d\n' "$open_count"
+  printf 'Investigations: %d\n' "$inv_count"
+  printf 'Needs Review:   %s\n' "$review_state"
+  printf 'Handover:       %s\n' "$handover_state"
+  echo
+}
+
+while true; do
+  clear
+
+  echo "SESami NOC Console"
+  echo "============================================================"
+  echo
+
+  show_dashboard
+
+  echo "Actions"
+  echo
+  echo "  1) Start Shift"
+  echo "  2) View Status"
+  echo "  3) Sync Jira"
+  echo "  4) Investigation"
+  echo "  5) End Shift"
+  echo "  6) Health Check"
+  echo "  7) Regression Tests"
+  echo "  8) Exit"
+  echo
+
+  read -rp "Selection [1-8]: " choice
+
+  case "$choice" in
+    1)
+      run_tool noc-start
+      ;;
+
+    2)
+      run_tool noc-status --date "$DAY"
+      pause
+      ;;
+
+    3)
+      run_tool tix sync --all
+      pause
+      ;;
+
+    4)
+      investigation_menu
+      ;;
+
+    5)
+      run_tool noc-end --date "$DAY"
+      pause
+      ;;
+
+    6)
+      run_tool noc-doctor --deep
+      pause
+      ;;
+
+    7)
+      run_tool noc-test
+      pause
+      ;;
+
+    8)
+      echo
+      echo "NOC Console closed."
+      exit 0
+      ;;
+
+    *)
+      echo
+      echo "Invalid selection."
+      sleep 1
+      ;;
+  esac
+done

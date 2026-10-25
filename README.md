@@ -603,6 +603,140 @@ The regression suite must never modify repository source files, production `~/no
 
 Source-integrity checks protect the core scripts from accidental modification by the test harness.
 
+# NOC Console
+
+`noc-console` provides a single interactive entry point for the NOC automation toolkit.
+
+```bash
+noc-console
+```
+
+Historical shifts can also be selected:
+
+```bash
+noc-console --yesterday
+noc-console --date YYYY-MM-DD
+```
+
+## Dashboard
+
+The console displays a compact local shift overview:
+
+```text
+SESami NOC Console
+============================================================
+
+Shift:          2026-10-22
+Open Jira:      5
+Investigations: 1
+Needs Review:   No
+Handover:       Created
+```
+
+The dashboard is read-only. Jira freshness is still determined by:
+
+```bash
+tix sync --all
+```
+
+## Console Actions
+
+```text
+1) Start Shift
+2) View Status
+3) Sync Jira
+4) Investigation
+5) End Shift
+6) Health Check
+7) Regression Tests
+8) Exit
+```
+
+### Start Shift
+
+Runs:
+
+```bash
+noc-start
+```
+
+This performs normal shift initialization and launches Copilot CLI for the operational workflow and shift-note work.
+
+### View Status
+
+Runs:
+
+```bash
+noc-status --date YYYY-MM-DD
+```
+
+### Sync Jira
+
+Runs:
+
+```bash
+tix sync --all
+```
+
+All existing Jira change previews and individual approval controls remain active.
+
+### Investigation
+
+Provides a submenu for:
+
+```text
+1) Create investigation from final Notebook
+2) Open existing investigation
+3) List investigations
+4) Back
+```
+
+Investigation creation and validation continue to be handled by `noc-inv`.
+
+### End Shift
+
+Runs:
+
+```bash
+noc-end --date YYYY-MM-DD
+```
+
+This preserves the existing Jira review, readiness, health, handover, preview, and M365 delivery controls.
+
+### Health Check
+
+Runs:
+
+```bash
+noc-doctor --deep
+```
+
+### Regression Tests
+
+Runs:
+
+```bash
+noc-test
+```
+
+## Design Boundary
+
+`noc-console` is an interface layer.
+
+It does not reimplement:
+
+- Jira synchronization
+- Datadog investigation
+- investigation validation
+- shift readiness
+- automation health checks
+- handover generation
+- M365 email delivery
+
+Those responsibilities remain in their existing tested commands.
+
+A command failure is displayed by the console without terminating the console itself, allowing the operator to return to the menu and choose the appropriate next action.
+
 ## Operating principle
 
 ```text

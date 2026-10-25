@@ -37,6 +37,7 @@ jobs:
             noc-end
             noc-install
             noc-rollback
+            noc-console
           )
 
           for script in "${scripts[@]}"; do
@@ -78,7 +79,8 @@ jobs:
             noc-test \
             noc-inv \
             noc-handover \
-            noc-end
+            noc-end \
+            noc-console
 
       - name: Run isolated regression suite
         shell: bash
