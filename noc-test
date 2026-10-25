@@ -35,6 +35,25 @@ for cmd in tix noc-start noc-status noc-inv noc-handover noc-end; do
   fi
 done
 
+# Protect repository source files from accidental modification by tests.
+declare -A SOURCE_SHA
+
+SOURCE_FILES=(
+  tix
+  noc-start
+  noc-status
+  noc-doctor
+  noc-inv
+  noc-handover
+  noc-end
+)
+
+for src in "${SOURCE_FILES[@]}"; do
+  if [[ -f "$SCRIPT_DIR/$src" ]]; then
+    SOURCE_SHA[$src]=$(sha256sum "$SCRIPT_DIR/$src" | awk '{print $1}')
+  fi
+done
+
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/noc-test.XXXXXX")
 TEST_HOME="$LAB/home"
 MOCK_BIN="$LAB/bin"
@@ -780,6 +799,81 @@ else
   if find "$HOME/noc" -path '*/investigations/synthetic-investigation/investigation.md' -print -quit | grep -q .; then fail "invalid URL created investigation record"; else pass "invalid URL created no investigation record"; fi
 fi
 
+setup_end_mocks() {
+  local bin="$1"
+  local calls="$2"
+
+  mkdir -p "$bin"
+  : > "$calls"
+
+  cat > "$bin/noc-status" <<'MOCK'
+#!/usr/bin/env bash
+cat <<'OUT'
+NOC STATUS
+
+Shift
+  [OK] Shift directory
+  [OK] Shift notes available
+
+Needs Review
+  Review: None detected
+
+Investigations
+  Investigations: None
+
+Read-only status check complete. No records were changed.
+OUT
+exit 0
+MOCK
+
+  cat > "$bin/noc-doctor" <<'MOCK'
+#!/usr/bin/env bash
+cat <<'OUT'
+NOC DOCTOR
+
+Result
+  Passed:   10
+  Warnings: 2
+  Failed:   0
+  Health:   HEALTHY WITH WARNINGS
+OUT
+exit 0
+MOCK
+
+  cat > "$bin/noc-handover" <<'MOCK'
+#!/usr/bin/env bash
+echo "ERROR: noc-handover should not have been called" >&2
+exit 99
+MOCK
+
+  cat > "$bin/tix" <<'MOCK'
+#!/usr/bin/env bash
+echo "ERROR: tix should not have been called" >&2
+exit 99
+MOCK
+
+  cat > "$bin/m365" <<'MOCK'
+#!/usr/bin/env bash
+
+printf '%s\n' "$*" >> "${M365_CALL_LOG:?}"
+
+if [[ " $* " == *" --preview "* ]]; then
+  echo "MOCK M365 PREVIEW"
+  exit 0
+fi
+
+echo "MOCK M365 SEND"
+exit 0
+MOCK
+
+  chmod +x \
+    "$bin/noc-status" \
+    "$bin/noc-doctor" \
+    "$bin/noc-handover" \
+    "$bin/tix" \
+    "$bin/m365"
+}
+
 printf '\n19. noc-end Existing Handover / Skip Sync\n'
 
 if [[ -z "${PROD[noc-end]:-}" ]]; then
@@ -923,6 +1017,349 @@ MOCK
     pass "noc-end allowed delivery to be skipped"
   else
     fail "noc-end delivery-skip confirmation missing"
+  fi
+fi
+
+printf '\n20. Test Harness Source Integrity\n'
+
+for src in "${SOURCE_FILES[@]}"; do
+  [[ -n "${SOURCE_SHA[$src]:-}" ]] || continue
+
+  current_sha=$(sha256sum "$SCRIPT_DIR/$src" | awk '{print $1}')
+
+  if [[ "$current_sha" == "${SOURCE_SHA[$src]}" ]]; then
+    pass "$src source unchanged by regression suite"
+  else
+    fail "$src source was modified by regression suite"
+  fi
+done
+
+printf '\n21. noc-end M365 Self Preview and Cancel\n'
+
+if [[ -z "${PROD[noc-end]:-}" ]]; then
+  skip "noc-end not available"
+else
+  MAIL_DAY="2026-10-23"
+  MAIL_SHIFT="$HOME/noc/$MAIL_DAY"
+  MAIL_HANDOVER="$MAIL_SHIFT/handover/handover-$MAIL_DAY.md"
+  MAIL_BIN="$LAB/mail-test-bin"
+  M365_CALL_LOG="$LAB/m365-self-cancel.log"
+
+  mkdir -p "$MAIL_SHIFT/handover"
+
+  printf '# Synthetic shift notes\n' > "$MAIL_SHIFT/shift-notes.md"
+
+  cat > "$MAIL_HANDOVER" <<'HANDOVER'
+Hi Team,
+
+## Summary
+
+Synthetic P6 handover.
+
+## Next Shift Actions
+
+- Synthetic action only.
+HANDOVER
+
+  setup_end_mocks "$MAIL_BIN" "$M365_CALL_LOG"
+
+  export M365_CALL_LOG
+
+  # 1 = send to myself
+  # n = cancel after preview
+  if printf '1\nn\n' |
+     PATH="$MAIL_BIN:$MOCK_BIN:/usr/bin:/bin" \
+     noc-end --date "$MAIL_DAY" --skip-sync \
+     >"$LAB/noc-end-self-cancel.out" 2>&1; then
+    pass "noc-end self-delivery cancel path completed"
+  else
+    fail "noc-end self-delivery cancel path failed"
+  fi
+
+  if grep -Fq -- "--note-to-self" "$M365_CALL_LOG"; then
+    pass "self delivery used note-to-self"
+  else
+    fail "self delivery did not use note-to-self"
+  fi
+
+  if grep -Fq -- "--preview" "$M365_CALL_LOG"; then
+    pass "self delivery preview occurred"
+  else
+    fail "self delivery preview missing"
+  fi
+
+  call_count=$(wc -l < "$M365_CALL_LOG")
+
+  assert_eq \
+    "$call_count" \
+    "1" \
+    "self cancel made only the preview M365 call"
+
+  if grep -Fq "Send canceled. Handover was not emailed." \
+      "$LAB/noc-end-self-cancel.out"; then
+    pass "self delivery cancel was reported"
+  else
+    fail "self delivery cancel message missing"
+  fi
+fi
+
+printf '\n22. noc-end M365 Alternate Recipient Preview and Cancel\n'
+
+if [[ -z "${PROD[noc-end]:-}" ]]; then
+  skip "noc-end not available"
+else
+  MAIL_DAY="2026-10-23"
+  MAIL_SHIFT="$HOME/noc/$MAIL_DAY"
+  MAIL_HANDOVER="$MAIL_SHIFT/handover/handover-$MAIL_DAY.md"
+  MAIL_BIN="$LAB/mail-alt-test-bin"
+  M365_CALL_LOG="$LAB/m365-alt-cancel.log"
+
+  mkdir -p "$MAIL_SHIFT/handover"
+
+  printf '# Synthetic shift notes\n' > "$MAIL_SHIFT/shift-notes.md"
+
+  cat > "$MAIL_HANDOVER" <<'HANDOVER'
+Hi Team,
+
+## Summary
+
+Synthetic alternate-recipient P6 handover.
+
+## Next Shift Actions
+
+- Synthetic action only.
+HANDOVER
+
+  setup_end_mocks "$MAIL_BIN" "$M365_CALL_LOG"
+
+  export M365_CALL_LOG
+
+  # 2 = another email
+  # test@example.com = synthetic recipient
+  # n = cancel after preview
+  if printf '2\ntest@example.com\nn\n' |
+     PATH="$MAIL_BIN:$MOCK_BIN:/usr/bin:/bin" \
+     noc-end --date "$MAIL_DAY" --skip-sync \
+     >"$LAB/noc-end-alt-cancel.out" 2>&1; then
+    pass "noc-end alternate-delivery cancel path completed"
+  else
+    fail "noc-end alternate-delivery cancel path failed"
+  fi
+
+  if grep -Fq -- "--to test@example.com" "$M365_CALL_LOG"; then
+    pass "alternate delivery used requested recipient"
+  else
+    fail "alternate delivery recipient missing"
+  fi
+
+  if grep -Fq -- "--preview" "$M365_CALL_LOG"; then
+    pass "alternate delivery preview occurred"
+  else
+    fail "alternate delivery preview missing"
+  fi
+
+  call_count=$(wc -l < "$M365_CALL_LOG")
+
+  assert_eq \
+    "$call_count" \
+    "1" \
+    "alternate cancel made only the preview M365 call"
+
+  if grep -Fq "Send canceled. Handover was not emailed." \
+      "$LAB/noc-end-alt-cancel.out"; then
+    pass "alternate delivery cancel was reported"
+  else
+    fail "alternate delivery cancel message missing"
+  fi
+fi
+
+printf '\n23. noc-end M365 Delivery Skip\n'
+
+if [[ -z "${PROD[noc-end]:-}" ]]; then
+  skip "noc-end not available"
+else
+  MAIL_DAY="2026-10-23"
+  MAIL_SHIFT="$HOME/noc/$MAIL_DAY"
+  MAIL_HANDOVER="$MAIL_SHIFT/handover/handover-$MAIL_DAY.md"
+  MAIL_BIN="$LAB/mail-skip-test-bin"
+  M365_CALL_LOG="$LAB/m365-skip.log"
+
+  mkdir -p "$MAIL_SHIFT/handover"
+
+  printf '# Synthetic shift notes\n' > "$MAIL_SHIFT/shift-notes.md"
+
+  cat > "$MAIL_HANDOVER" <<'HANDOVER'
+Hi Team,
+
+## Summary
+
+Synthetic P6 delivery-skip handover.
+
+## Next Shift Actions
+
+- Synthetic action only.
+HANDOVER
+
+  setup_end_mocks "$MAIL_BIN" "$M365_CALL_LOG"
+
+  export M365_CALL_LOG
+
+  # 3 = Do not send
+  if printf '3\n' |
+     PATH="$MAIL_BIN:$MOCK_BIN:/usr/bin:/bin" \
+     noc-end --date "$MAIL_DAY" --skip-sync \
+     >"$LAB/noc-end-delivery-skip.out" 2>&1; then
+    pass "noc-end delivery-skip path completed"
+  else
+    fail "noc-end delivery-skip path failed"
+  fi
+
+  call_count=$(wc -l < "$M365_CALL_LOG")
+
+  assert_eq \
+    "$call_count" \
+    "0" \
+    "delivery skip made zero M365 calls"
+
+  if grep -Fq "Handover delivery skipped." \
+      "$LAB/noc-end-delivery-skip.out"; then
+    pass "delivery skip was reported"
+  else
+    fail "delivery skip message missing"
+  fi
+fi
+
+printf '\n24. noc-end M365 Invalid Recipient Rejection\n'
+
+if [[ -z "${PROD[noc-end]:-}" ]]; then
+  skip "noc-end not available"
+else
+  MAIL_DAY="2026-10-23"
+  MAIL_SHIFT="$HOME/noc/$MAIL_DAY"
+  MAIL_HANDOVER="$MAIL_SHIFT/handover/handover-$MAIL_DAY.md"
+  MAIL_BIN="$LAB/mail-invalid-test-bin"
+  M365_CALL_LOG="$LAB/m365-invalid.log"
+
+  mkdir -p "$MAIL_SHIFT/handover"
+
+  printf '# Synthetic shift notes\n' > "$MAIL_SHIFT/shift-notes.md"
+
+  cat > "$MAIL_HANDOVER" <<'HANDOVER'
+Hi Team,
+
+## Summary
+
+Synthetic invalid-recipient P6 handover.
+
+## Next Shift Actions
+
+- Synthetic action only.
+HANDOVER
+
+  setup_end_mocks "$MAIL_BIN" "$M365_CALL_LOG"
+
+  export M365_CALL_LOG
+
+  # 2 = another email
+  # invalid-address = intentionally invalid
+  if printf '2\ninvalid-address\n' |
+     PATH="$MAIL_BIN:$MOCK_BIN:/usr/bin:/bin" \
+     noc-end --date "$MAIL_DAY" --skip-sync \
+     >"$LAB/noc-end-invalid-email.out" 2>&1; then
+    fail "invalid email address was unexpectedly accepted"
+  else
+    pass "invalid email address was rejected"
+  fi
+
+  call_count=$(wc -l < "$M365_CALL_LOG")
+
+  assert_eq \
+    "$call_count" \
+    "0" \
+    "invalid recipient made zero M365 calls"
+
+  if grep -Fq "ERROR: Invalid email address." \
+      "$LAB/noc-end-invalid-email.out"; then
+    pass "invalid recipient error was reported"
+  else
+    fail "invalid recipient error message missing"
+  fi
+fi
+
+printf '\n25. noc-end M365 Approved Self Send\n'
+
+if [[ -z "${PROD[noc-end]:-}" ]]; then
+  skip "noc-end not available"
+else
+  MAIL_DAY="2026-10-23"
+  MAIL_SHIFT="$HOME/noc/$MAIL_DAY"
+  MAIL_HANDOVER="$MAIL_SHIFT/handover/handover-$MAIL_DAY.md"
+  MAIL_BIN="$LAB/mail-send-test-bin"
+  M365_CALL_LOG="$LAB/m365-self-send.log"
+
+  mkdir -p "$MAIL_SHIFT/handover"
+
+  printf '# Synthetic shift notes\n' > "$MAIL_SHIFT/shift-notes.md"
+
+  cat > "$MAIL_HANDOVER" <<'HANDOVER'
+Hi Team,
+
+## Summary
+
+Synthetic approved-send P6 handover.
+
+## Next Shift Actions
+
+- Synthetic action only.
+HANDOVER
+
+  setup_end_mocks "$MAIL_BIN" "$M365_CALL_LOG"
+
+  export M365_CALL_LOG
+
+  # 1 = send to myself
+  # y = approve after preview
+  if printf '1\ny\n' |
+     PATH="$MAIL_BIN:$MOCK_BIN:/usr/bin:/bin" \
+     noc-end --date "$MAIL_DAY" --skip-sync \
+     >"$LAB/noc-end-self-send.out" 2>&1; then
+    pass "noc-end approved self-send path completed"
+  else
+    fail "noc-end approved self-send path failed"
+  fi
+
+  call_count=$(wc -l < "$M365_CALL_LOG")
+
+  assert_eq \
+    "$call_count" \
+    "2" \
+    "approved self-send made exactly two M365 calls"
+
+  preview_count=$(grep -c -- '--preview' "$M365_CALL_LOG" || true)
+
+  assert_eq \
+    "$preview_count" \
+    "1" \
+    "approved self-send made exactly one preview call"
+
+  send_count=$(grep -vc -- '--preview' "$M365_CALL_LOG" || true)
+
+  assert_eq \
+    "$send_count" \
+    "1" \
+    "approved self-send made exactly one non-preview send call"
+
+  if grep -Fq -- "--note-to-self" "$M365_CALL_LOG"; then
+    pass "approved self-send used note-to-self"
+  else
+    fail "approved self-send did not use note-to-self"
+  fi
+
+  if grep -Fq "[OK] Handover sent to your signed-in M365 mailbox." \
+      "$LAB/noc-end-self-send.out"; then
+    pass "approved self-send success was reported"
+  else
+    fail "approved self-send success message missing"
   fi
 fi
 
