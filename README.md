@@ -455,6 +455,154 @@ List and restore deployment backups:
 ./noc-rollback latest
 ```
 
+# Continuous Integration
+
+This repository uses GitHub Actions to validate changes pushed to `main` and pull requests targeting `main`.
+
+Workflow:
+
+```text
+.github/workflows/noc-ci.yaml
+```
+
+## CI Pipeline
+
+The workflow runs two jobs.
+
+### 1. Bash Syntax Validation
+
+GitHub Actions validates the shell syntax of the NOC automation scripts using:
+
+```bash
+bash -n
+```
+
+The CI checks:
+
+- `tix`
+- `noc-start`
+- `noc-status`
+- `noc-doctor`
+- `noc-test`
+- `noc-inv`
+- `noc-handover`
+- `noc-end`
+- `noc-install`
+- `noc-rollback`
+
+A syntax failure stops the pipeline before regression testing.
+
+### 2. Isolated Regression Testing
+
+After syntax validation passes, GitHub Actions runs:
+
+```bash
+./noc-test
+```
+
+The regression suite uses synthetic data, temporary directories, and mocked external services.
+
+It validates behaviors including:
+
+- Jira ticket add and synchronization safety
+- bulk `tix sync --all`
+- preservation of NOC-owned ticket fields
+- Atlas failure isolation
+- Jira `Done` tickets remaining locally open
+- read-only `noc-status`
+- handover overwrite protection
+- Confluence documentation carry-through
+- `noc-inv` generated-record validation
+- `noc-end` orchestration
+- M365 handover preview and delivery controls
+- source-file integrity during testing
+
+## CI Security Boundary
+
+GitHub Actions does not receive production credentials or operational data.
+
+CI does not have access to:
+
+- Jira credentials
+- Atlas authentication
+- Datadog credentials
+- Microsoft 365 credentials
+- production `~/noc` data
+- production deployment credentials
+
+Atlas, Copilot, Datadog-related behavior, and M365 email delivery are mocked where required by the regression suite.
+
+No real Jira changes, Datadog changes, production ticket changes, or emails should occur during CI.
+
+## Deployment Boundary
+
+A successful GitHub Actions run validates the source code but does not deploy it.
+
+Production deployment remains a deliberate local action:
+
+```bash
+cd ~/code/noc-tools
+
+git pull
+./noc-test
+./noc-install
+noc-doctor --deep
+```
+
+The deployment workflow is:
+
+```text
+Code change
+    ↓
+Local regression tests
+    ↓
+Git commit / push
+    ↓
+GitHub Actions
+    ├── Bash syntax validation
+    └── Isolated regression suite
+    ↓
+CI green
+    ↓
+Manual noc-install
+    ↓
+Production
+```
+
+GitHub Actions is the validation gate.
+
+`noc-install` remains the production deployment gate.
+
+## Regression Philosophy
+
+Real operational failures should become permanent regression tests whenever practical.
+
+The workflow is:
+
+```text
+Real shift issue
+    ↓
+Reproduce with synthetic data
+    ↓
+Add regression test
+    ↓
+Verify failure
+    ↓
+Fix code
+    ↓
+Verify regression suite passes
+    ↓
+Commit and push
+    ↓
+GitHub Actions validates
+    ↓
+Controlled deployment
+```
+
+The regression suite must never modify repository source files, production `~/noc` data, Jira, Datadog, or Microsoft 365.
+
+Source-integrity checks protect the core scripts from accidental modification by the test harness.
+
 ## Operating principle
 
 ```text
@@ -464,3 +612,5 @@ Source systems provide facts
         -> the NOC Engineer reviews and decides
         -> the next shift receives a concise operational handoff
 ```
+
+
