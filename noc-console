@@ -3,6 +3,33 @@
 
 set -uo pipefail
 
+NO_COLOR=false
+
+# SES-style terminal palette
+SES_ORANGE=$'\033[38;5;208m'
+SES_CYAN=$'\033[38;5;45m'
+GREEN=$'\033[38;5;82m'
+YELLOW=$'\033[38;5;220m'
+RED=$'\033[38;5;196m'
+WHITE=$'\033[97m'
+GRAY=$'\033[38;5;245m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+RESET=$'\033[0m'
+
+disable_colors() {
+  SES_ORANGE=""
+  SES_CYAN=""
+  GREEN=""
+  YELLOW=""
+  RED=""
+  WHITE=""
+  GRAY=""
+  BOLD=""
+  DIM=""
+  RESET=""
+}
+
 DAY=""
 
 usage() {
@@ -15,6 +42,7 @@ Usage:
 Options:
   --yesterday        Use the previous calendar day's shift.
   --date YYYY-MM-DD  Use a specific shift date.
+  --no-color         Disable terminal colors.
   -h, --help         Show this help.
 TXT
 }
@@ -38,6 +66,11 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       usage
       exit 0
+      ;;
+
+    --no-color)
+      NO_COLOR=true
+      disable_colors
       ;;
 
     *)
@@ -92,21 +125,39 @@ run_tool() {
   return 0
 }
 
+show_header() {
+  printf '%s%s' "$SES_ORANGE" "$BOLD"
+  echo "╔══════════════════════════════════════════════════════════════╗"
+  echo "║                    SES NOC CONSOLE                           ║"
+  echo "║                 OPERATIONS CONTROL CENTER                    ║"
+  echo "╚══════════════════════════════════════════════════════════════╝"
+  printf '%s' "$RESET"
+  echo
+}
+
 investigation_menu() {
-  local inv_choice inv_dir inv_name
+  local inv_choice inv_dir inv_name inv
   local investigation_root="$HOME/noc/$DAY/investigations"
 
   while true; do
     clear
 
-    echo "============================================================"
-    echo "NOC Investigation - $DAY"
-    echo "============================================================"
+    printf '%s%s' "$SES_ORANGE" "$BOLD"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                    NOC INVESTIGATIONS                        ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    printf '%s' "$RESET"
+
     echo
-    echo "  1) Create investigation from final Notebook"
-    echo "  2) Open existing investigation"
-    echo "  3) List investigations"
-    echo "  4) Back"
+    printf 'Shift: %s%s%s\n' "$WHITE" "$DAY" "$RESET"
+    echo
+
+    printf '%s%sINVESTIGATION ACTIONS%s\n' "$SES_CYAN" "$BOLD" "$RESET"
+    printf '%s\n' "──────────────────────────────────────────────────────────────"
+    printf '  %s[1]%s  Create from Final Datadog Notebook\n' "$SES_CYAN" "$RESET"
+    printf '  %s[2]%s  Open Existing Investigation\n' "$SES_CYAN" "$RESET"
+    printf '  %s[3]%s  List Investigations\n' "$SES_CYAN" "$RESET"
+    printf '  %s[4]%s  Back\n' "$GRAY" "$RESET"
     echo
 
     read -rp "Selection [1-4]: " inv_choice
@@ -123,7 +174,7 @@ investigation_menu() {
 
         if [[ -z "$inv_name" ]]; then
           echo
-          echo "Investigation name is required."
+          echo "[ERROR] Investigation name is required."
           pause
           continue
         fi
@@ -152,11 +203,13 @@ investigation_menu() {
         if [[ ${#investigations[@]} -eq 0 ]]; then
           echo "No investigations found for $DAY."
         else
-          echo "Investigations for $DAY:"
+          printf '%s%sInvestigations for %s%s\n' \
+            "$SES_CYAN" "$BOLD" "$DAY" "$RESET"
           echo
 
           for inv in "${investigations[@]}"; do
-            printf '  - %s\n' "$(basename "$(dirname "$inv")")"
+            printf '  %s•%s %s\n' \
+              "$SES_ORANGE" "$RESET" "$(basename "$(dirname "$inv")")"
           done
         fi
 
@@ -169,7 +222,7 @@ investigation_menu() {
 
       *)
         echo
-        echo "Invalid selection."
+        printf '%sInvalid selection.%s\n' "$YELLOW" "$RESET"
         sleep 1
         ;;
     esac
@@ -177,7 +230,7 @@ investigation_menu() {
 }
 
 show_dashboard() {
-  local open_count inv_count handover_state review_state f
+  local open_count inv_count handover_state review_state overall_state f
 
   shopt -s nullglob
   local tickets=("$HOME/noc/tickets/open/"*.json)
@@ -188,95 +241,109 @@ show_dashboard() {
   inv_count=${#investigations[@]}
 
   if [[ -s "$HOME/noc/$DAY/handover/handover-$DAY.md" ]]; then
-    handover_state="Created"
+    handover_state="${GREEN}CREATED${RESET}"
   else
-    handover_state="Not Created"
+    handover_state="${YELLOW}PENDING${RESET}"
   fi
 
-  review_state="No"
+  review_state="${GREEN}NO${RESET}"
+  overall_state="${GREEN}● READY${RESET}"
 
   for f in "${tickets[@]}"; do
     if [[ "$(jq -r '.jira.status // ""' "$f" 2>/dev/null)" =~ ^(Done|Closed|Resolved)$ ]]; then
-      review_state="Yes"
+      review_state="${YELLOW}YES${RESET}"
+      overall_state="${YELLOW}● REVIEW REQUIRED${RESET}"
       break
     fi
   done
 
-  echo "Shift:          $DAY"
-  printf 'Open Jira:      %d\n' "$open_count"
-  printf 'Investigations: %d\n' "$inv_count"
-  printf 'Needs Review:   %s\n' "$review_state"
-  printf 'Handover:       %s\n' "$handover_state"
+  printf '%s%sSHIFT OVERVIEW%s\n' "$SES_CYAN" "$BOLD" "$RESET"
+  printf '%s\n' "──────────────────────────────────────────────────────────────"
+  printf '  Shift:          %s\n' "$DAY"
+  printf '  Status:         %b\n' "$overall_state"
+  echo
+
+  printf '%s%sOPERATIONS%s\n' "$SES_CYAN" "$BOLD" "$RESET"
+  printf '%s\n' "──────────────────────────────────────────────────────────────"
+  printf '  Open Jira:      %s%d%s\n' "$WHITE" "$open_count" "$RESET"
+  printf '  Investigations: %s%d%s\n' "$WHITE" "$inv_count" "$RESET"
+  printf '  Needs Review:   %b\n' "$review_state"
+  printf '  Handover:       %b\n' "$handover_state"
   echo
 }
 
 while true; do
   clear
 
-  echo "SESami NOC Console"
-  echo "============================================================"
-  echo
-
+  show_header
   show_dashboard
 
-  echo "Actions"
+  printf '%s%sSHIFT OPERATIONS%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
+  printf '%s\n' "──────────────────────────────────────────────────────────────"
+  printf '  %s[1]%s  Start Shift\n' "$SES_CYAN" "$RESET"
+  printf '  %s[2]%s  View Status\n' "$SES_CYAN" "$RESET"
+  printf '  %s[3]%s  Sync Jira\n' "$SES_CYAN" "$RESET"
+  printf '  %s[4]%s  Investigations\n' "$SES_CYAN" "$RESET"
   echo
-  echo "  1) Start Shift"
-  echo "  2) View Status"
-  echo "  3) Sync Jira"
-  echo "  4) Investigation"
-  echo "  5) End Shift"
-  echo "  6) Health Check"
-  echo "  7) Regression Tests"
-  echo "  8) Exit"
+
+  printf '%s%sSHIFT CONTROL%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
+  printf '%s\n' "──────────────────────────────────────────────────────────────"
+  printf '  %s[5]%s  End Shift\n' "$SES_CYAN" "$RESET"
+  printf '  %s[6]%s  Health Check\n' "$SES_CYAN" "$RESET"
+  echo
+
+  printf '%s%sSYSTEM%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
+  printf '%s\n' "──────────────────────────────────────────────────────────────"
+  printf '  %s[7]%s  Regression Tests\n' "$SES_CYAN" "$RESET"
+  printf '  %s[8]%s  Exit\n' "$GRAY" "$RESET"
   echo
 
   read -rp "Selection [1-8]: " choice
 
-  case "$choice" in
-    1)
-      run_tool noc-start
-      ;;
+    case "$choice" in
+      1)
+        run_tool noc-start
+        ;;
 
-    2)
-      run_tool noc-status --date "$DAY"
-      pause
-      ;;
+      2)
+        run_tool noc-status --date "$DAY"
+        pause
+        ;;
 
-    3)
-      run_tool tix sync --all
-      pause
-      ;;
+      3)
+        run_tool tix sync --all
+        pause
+        ;;
 
-    4)
-      investigation_menu
-      ;;
+      4)
+        investigation_menu
+        ;;
 
-    5)
-      run_tool noc-end --date "$DAY"
-      pause
-      ;;
+      5)
+        run_tool noc-end --date "$DAY"
+        pause
+        ;;
 
-    6)
-      run_tool noc-doctor --deep
-      pause
-      ;;
+      6)
+        run_tool noc-doctor --deep
+        pause
+        ;;
 
-    7)
-      run_tool noc-test
-      pause
-      ;;
+      7)
+        run_tool noc-test
+        pause
+        ;;
 
-    8)
-      echo
-      echo "NOC Console closed."
-      exit 0
-      ;;
+      8)
+        echo
+        printf '%sNOC Console closed.%s\n' "$GRAY" "$RESET"
+        exit 0
+        ;;
 
-    *)
-      echo
-      echo "Invalid selection."
-      sleep 1
-      ;;
+      *)
+        echo
+        printf '%sInvalid selection.%s\n' "$YELLOW" "$RESET"
+        sleep 1
+        ;;
   esac
 done
