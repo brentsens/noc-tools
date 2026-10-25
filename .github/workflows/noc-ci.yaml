@@ -1,0 +1,54 @@
+name: NOC Tools CI
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Bash syntax validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Bash syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scripts=(
+            tix
+            noc-start
+            noc-status
+            noc-doctor
+            noc-test
+            noc-inv
+            noc-handover
+            noc-end
+            noc-install
+            noc-rollback
+          )
+
+          for script in "${scripts[@]}"; do
+            echo "Checking $script"
+
+            if [[ ! -f "$script" ]]; then
+              echo "ERROR: Missing $script"
+              exit 1
+            fi
+
+            bash -n "$script"
+          done
+
+          echo
+          echo "All Bash syntax checks passed."
