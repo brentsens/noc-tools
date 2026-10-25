@@ -229,6 +229,32 @@ investigation_menu() {
   done
 }
 
+view_shift_notes() {
+  local notes="$HOME/noc/$DAY/shift-notes.md"
+
+  clear
+
+  printf '%s%s' "$SES_ORANGE" "$BOLD"
+  echo "╔══════════════════════════════════════════════════════════════╗"
+  echo "║                      SHIFT NOTES                             ║"
+  echo "╚══════════════════════════════════════════════════════════════╝"
+  printf '%s' "$RESET"
+
+  echo
+  printf 'Shift: %s%s%s\n' "$WHITE" "$DAY" "$RESET"
+  echo
+  printf '%s\n' "──────────────────────────────────────────────────────────────"
+  echo
+
+  if [[ -s "$notes" ]]; then
+    cat "$notes"
+  else
+    printf '%sShift notes not created yet.%s\n' "$YELLOW" "$RESET"
+  fi
+
+  pause
+}
+
 show_dashboard() {
   local open_count inv_count handover_state review_state overall_state f
 
@@ -282,23 +308,24 @@ while true; do
   printf '%s\n' "──────────────────────────────────────────────────────────────"
   printf '  %s[1]%s  Start Shift\n' "$SES_CYAN" "$RESET"
   printf '  %s[2]%s  View Status\n' "$SES_CYAN" "$RESET"
-  printf '  %s[3]%s  Sync Jira\n' "$SES_CYAN" "$RESET"
-  printf '  %s[4]%s  Investigations\n' "$SES_CYAN" "$RESET"
+  printf '  %s[3]%s  View Shift Notes\n' "$SES_CYAN" "$RESET"
+  printf '  %s[4]%s  Sync Jira\n' "$SES_CYAN" "$RESET"
+  printf '  %s[5]%s  Investigations\n' "$SES_CYAN" "$RESET"
   echo
 
   printf '%s%sSHIFT CONTROL%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
   printf '%s\n' "──────────────────────────────────────────────────────────────"
-  printf '  %s[5]%s  End Shift\n' "$SES_CYAN" "$RESET"
-  printf '  %s[6]%s  Health Check\n' "$SES_CYAN" "$RESET"
+  printf '  %s[6]%s  End Shift\n' "$SES_CYAN" "$RESET"
+  printf '  %s[7]%s  Health Check\n' "$SES_CYAN" "$RESET"
   echo
 
   printf '%s%sSYSTEM%s\n' "$SES_ORANGE" "$BOLD" "$RESET"
   printf '%s\n' "──────────────────────────────────────────────────────────────"
-  printf '  %s[7]%s  Regression Tests\n' "$SES_CYAN" "$RESET"
-  printf '  %s[8]%s  Exit\n' "$GRAY" "$RESET"
+  printf '  %s[8]%s  Regression Tests\n' "$SES_CYAN" "$RESET"
+  printf '  %s[9]%s  Exit\n' "$GRAY" "$RESET"
   echo
 
-  read -rp "Selection [1-8]: " choice
+  read -rp "Selection [1-9]: " choice
 
     case "$choice" in
       1)
@@ -311,30 +338,34 @@ while true; do
         ;;
 
       3)
+        view_shift_notes
+        ;;
+
+      4)
         run_tool tix sync --all
         pause
         ;;
 
-      4)
+      5)
         investigation_menu
         ;;
 
-      5)
+      6)
         run_tool noc-end --date "$DAY"
         pause
         ;;
 
-      6)
+      7)
         run_tool noc-doctor --deep
         pause
         ;;
 
-      7)
+      8)
         run_tool noc-test
         pause
         ;;
 
-      8)
+      9)
         echo
         printf '%sNOC Console closed.%s\n' "$GRAY" "$RESET"
         exit 0

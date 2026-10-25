@@ -605,54 +605,93 @@ Source-integrity checks protect the core scripts from accidental modification by
 
 # NOC Console
 
-`noc-console` provides a single interactive entry point for the NOC automation toolkit.
+`noc-console` provides the primary interactive interface for the NOC automation toolkit.
 
 ```bash
 noc-console
 ```
 
-Historical shifts can also be selected:
+You can also view a previous shift:
 
 ```bash
 noc-console --yesterday
 noc-console --date YYYY-MM-DD
 ```
 
-## Dashboard
+For terminals or captured output where ANSI colors are not wanted:
 
-The console displays a compact local shift overview:
-
-```text
-SESami NOC Console
-============================================================
-
-Shift:          2026-10-22
-Open Jira:      5
-Investigations: 1
-Needs Review:   No
-Handover:       Created
+```bash
+noc-console --no-color
 ```
 
-The dashboard is read-only. Jira freshness is still determined by:
+## SES-Themed Interface
+
+The console uses an SES-style terminal theme with orange branding, cyan actions, green healthy states, yellow review states, and red errors.
+
+Example:
+
+```text
+╔══════════════════════════════════════════════════════════════╗
+║                    SES NOC CONSOLE                           ║
+║                 OPERATIONS CONTROL CENTER                    ║
+╚══════════════════════════════════════════════════════════════╝
+
+SHIFT OVERVIEW
+──────────────────────────────────────────────────────────────
+  Shift:          2026-10-22
+  Status:         ● READY
+
+OPERATIONS
+──────────────────────────────────────────────────────────────
+  Open Jira:      5
+  Investigations: 1
+  Needs Review:   NO
+  Handover:       CREATED
+
+SHIFT OPERATIONS
+──────────────────────────────────────────────────────────────
+  [1]  Start Shift
+  [2]  View Status
+  [3]  View Shift Notes
+  [4]  Sync Jira
+  [5]  Investigations
+
+SHIFT CONTROL
+──────────────────────────────────────────────────────────────
+  [6]  End Shift
+  [7]  Health Check
+
+SYSTEM
+──────────────────────────────────────────────────────────────
+  [8]  Regression Tests
+  [9]  Exit
+```
+
+## Dashboard
+
+The dashboard is read-only and displays the state of the selected shift.
+
+It shows:
+
+- selected shift date
+- locally tracked open Jira tickets
+- reviewed investigations
+- whether local tickets require review
+- whether the shift handover has been created
+
+The dashboard does not contact Jira directly.
+
+Use:
 
 ```bash
 tix sync --all
 ```
 
+or console option `4` when Jira freshness needs to be checked.
+
 ## Console Actions
 
-```text
-1) Start Shift
-2) View Status
-3) Sync Jira
-4) Investigation
-5) End Shift
-6) Health Check
-7) Regression Tests
-8) Exit
-```
-
-### Start Shift
+### 1. Start Shift
 
 Runs:
 
@@ -660,9 +699,9 @@ Runs:
 noc-start
 ```
 
-This performs normal shift initialization and launches Copilot CLI for the operational workflow and shift-note work.
+This initializes the shift workspace, performs startup readiness checks, and launches Copilot CLI for the normal operational workflow and shift-note work.
 
-### View Status
+### 2. View Status
 
 Runs:
 
@@ -670,7 +709,39 @@ Runs:
 noc-status --date YYYY-MM-DD
 ```
 
-### Sync Jira
+The selected console date is passed automatically.
+
+### 3. View Shift Notes
+
+Displays:
+
+```text
+~/noc/YYYY-MM-DD/shift-notes.md
+```
+
+The path is dynamically selected using the shift date currently loaded in the console.
+
+For example:
+
+```bash
+noc-console --date 2026-10-22
+```
+
+will display:
+
+```text
+~/noc/2026-10-22/shift-notes.md
+```
+
+If the file does not exist or is empty, the console reports:
+
+```text
+Shift notes not created yet.
+```
+
+Viewing shift notes is read-only.
+
+### 4. Sync Jira
 
 Runs:
 
@@ -678,22 +749,40 @@ Runs:
 tix sync --all
 ```
 
-All existing Jira change previews and individual approval controls remain active.
+The existing P1 safety controls remain active:
 
-### Investigation
+- Jira changes are previewed
+- each changed ticket requires individual approval
+- NOC-owned fields are preserved
+- failed Atlas reads do not modify the ticket
+- Jira `Done` does not automatically close the local ticket
 
-Provides a submenu for:
+### 5. Investigations
+
+Opens the investigation submenu:
 
 ```text
-1) Create investigation from final Notebook
-2) Open existing investigation
-3) List investigations
-4) Back
+╔══════════════════════════════════════════════════════════════╗
+║                    NOC INVESTIGATIONS                        ║
+╚══════════════════════════════════════════════════════════════╝
+
+INVESTIGATION ACTIONS
+──────────────────────────────────────────────────────────────
+  [1]  Create from Final Datadog Notebook
+  [2]  Open Existing Investigation
+  [3]  List Investigations
+  [4]  Back
 ```
 
-Investigation creation and validation continue to be handled by `noc-inv`.
+Investigation processing remains delegated to:
 
-### End Shift
+```bash
+noc-inv
+```
+
+The console does not duplicate Datadog retrieval or investigation validation logic.
+
+### 6. End Shift
 
 Runs:
 
@@ -701,9 +790,29 @@ Runs:
 noc-end --date YYYY-MM-DD
 ```
 
-This preserves the existing Jira review, readiness, health, handover, preview, and M365 delivery controls.
+This preserves the complete controlled end-of-shift workflow:
 
-### Health Check
+```text
+Jira freshness
+    ↓
+Shift status
+    ↓
+Review gate
+    ↓
+Automation health
+    ↓
+Readiness
+    ↓
+Handover generation
+    ↓
+Human review
+    ↓
+M365 preview
+    ↓
+Explicit send approval
+```
+
+### 7. Health Check
 
 Runs:
 
@@ -711,7 +820,7 @@ Runs:
 noc-doctor --deep
 ```
 
-### Regression Tests
+### 8. Regression Tests
 
 Runs:
 
@@ -719,23 +828,42 @@ Runs:
 noc-test
 ```
 
+The test suite remains isolated from production data and external service credentials.
+
+### 9. Exit
+
+Closes the console without changing operational data.
+
+## Console Failure Handling
+
+`noc-console` is an interface layer over the existing NOC tools.
+
+If an underlying command fails, the console reports the exit code:
+
+```text
+[ERROR] noc-status failed with exit code 42.
+```
+
+The console itself remains available so the operator can return to the menu and choose the appropriate next action.
+
 ## Design Boundary
 
-`noc-console` is an interface layer.
+`noc-console` does not reimplement operational logic.
 
-It does not reimplement:
+Responsibilities remain with the existing tools:
 
-- Jira synchronization
-- Datadog investigation
-- investigation validation
-- shift readiness
-- automation health checks
-- handover generation
-- M365 email delivery
+```text
+noc-start      → shift initialization
+noc-status     → operational status
+tix            → ticket management and Jira synchronization
+noc-inv        → Datadog investigation documentation
+noc-end        → end-of-shift orchestration
+noc-doctor     → health validation
+noc-test       → regression testing
+noc-handover   → handover generation
+```
 
-Those responsibilities remain in their existing tested commands.
-
-A command failure is displayed by the console without terminating the console itself, allowing the operator to return to the menu and choose the appropriate next action.
+This keeps the console lightweight while preserving the tested safety boundaries of the underlying automation.
 
 ## Operating principle
 
