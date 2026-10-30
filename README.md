@@ -349,6 +349,10 @@ Deploy:
 ./noc-install
 ```
 
+For an explicitly authorized deployment from an uncommitted working tree, use
+`./noc-install --allow-dirty`. The installer still runs `noc-test`, backs up
+replaced commands, validates installed scripts, and runs `noc-doctor --deep`.
+
 Validate the installed environment:
 
 ```bash

@@ -110,6 +110,7 @@ chmod +x "$MOCK_BIN/atlas"
 cat > "$MOCK_BIN/copilot" <<'MOCK'
 #!/usr/bin/env bash
 if [[ -f "${MOCK_STATE:?}/copilot-fail" ]]; then exit 1; fi
+if [[ -f "${MOCK_STATE:?}/copilot-timeout" ]]; then exec sleep 15; fi
 if [[ -f "${MOCK_STATE:?}/copilot-output" ]]; then cat "${MOCK_STATE:?}/copilot-output"; else echo '# Mock Copilot Output'; fi
 MOCK
 chmod +x "$MOCK_BIN/copilot"
@@ -1454,7 +1455,266 @@ EOF
   fi
 fi
 
-printf '\nResult\n'
+  printf '\n27. noc-inv Non-Interactive Web Contract\n'
+
+  if [[ -z "${PROD[noc-inv]}" ]]; then
+    skip "noc-inv not installed"
+  else
+    NI_DAY="2099-12-31"
+    NI_NAME="brinks-bridge-exceptions-stuck-event-timestamp-parse-failure-uspri-prod"
+    NI_TITLE="BRINKS Bridge Exceptions – stuck event timestamp parse failure (uspri-prod)"
+    NI_URL="https://app.datadoghq.com/notebook/15954893/brinks-bridge-exceptions-%25E2%2580%2593-stuck-event-timestamp-parse-failure-uspri-prod"
+    NI_OUT="$LAB/non-interactive-output"
+    NI_MAIN="$NI_OUT/investigation.md"
+    mkdir -p "$NI_OUT"
+    cat > "$MOCK_STATE/copilot-output" <<EOF
+# Investigation: $NI_TITLE
+
+- Display Title: $NI_TITLE
+- Investigation Name: $NI_NAME
+- Shift Date: $NI_DAY
+- FINAL Datadog Notebook: $NI_URL
+- Evidence Provenance: noc-inv
+- Status: Generated - Requires Operator Review
+- Source of truth: Final Datadog Notebook
+- Datadog Notebook: $NI_URL
+- Capture method: Datadog MCP
+
+## Summary
+
+Synthetic advisory summary.
+
+## Service / Environment
+
+Synthetic production service.
+
+## Customer / Service Impact
+
+Impact is not confirmed.
+
+## Timeline
+
+No material timeline events.
+
+## Confirmed Findings
+
+Synthetic finding from the Notebook.
+
+## Current Status
+
+Service status requires operator confirmation.
+
+## Actions Taken
+
+No changes were made.
+
+## Escalation / Ownership
+
+Operator review is required.
+
+## Next Actions
+
+Validate the findings with the service owner.
+
+## Handover Summary
+
+Review the generated findings before handover.
+EOF
+
+    if [[ "$("$SCRIPT_DIR/noc-inv" --contract-version)" == "noc-inv-contract=1" ]]; then
+      pass "noc-inv reports web contract version"
+    else
+      fail "noc-inv web contract version missing"
+    fi
+
+    if timeout 10 "$SCRIPT_DIR/noc-inv" \
+        --non-interactive \
+        --shift-date "$NI_DAY" \
+        --name "$NI_NAME" \
+        --display-title "$NI_TITLE" \
+        --notebook-url "$NI_URL" \
+        --output-dir "$NI_OUT" \
+        </dev/null >"$LAB/noc-inv-noninteractive.out" 2>&1; then
+      pass "non-interactive generation completed without prompting"
+    else
+      fail "non-interactive generation failed"
+    fi
+
+    for required_text in \
+        "- Display Title: $NI_TITLE" \
+        "- Investigation Name: $NI_NAME" \
+        "- Shift Date: $NI_DAY" \
+        "- FINAL Datadog Notebook: $NI_URL" \
+        "- Evidence Provenance: noc-inv" \
+        "## Summary" \
+        "## Confirmed Findings" \
+        "## Current Status" \
+        "## Next Actions" \
+        "## Handover Summary"; do
+      if grep -Fqx -- "$required_text" "$NI_MAIN" 2>/dev/null \
+         || grep -Fq -- "$required_text" "$NI_MAIN" 2>/dev/null; then
+        pass "non-interactive output preserved ${required_text%%:*}"
+      else
+        fail "non-interactive output missing required content"
+      fi
+    done
+
+    if [[ $(find "$NI_OUT" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 ]]; then
+      pass "only investigation.md remains in the output directory"
+    else
+      fail "non-interactive temporary files were not cleaned"
+    fi
+
+    if [[ ! -e "$HOME/noc/$NI_DAY" ]]; then
+      pass "non-interactive mode did not create a shift workspace"
+    else
+      fail "non-interactive mode redirected output into the shift workspace"
+    fi
+
+    if timeout 10 "$SCRIPT_DIR/noc-inv" \
+        --non-interactive \
+        --shift-date "$NI_DAY" \
+        --name "$NI_NAME" \
+        --display-title "$NI_TITLE" \
+        --notebook-url "$NI_URL" \
+        --output-dir "$NI_OUT" \
+        </dev/null >"$LAB/noc-inv-no-overwrite.out" 2>&1; then
+      fail "non-interactive output conflict unexpectedly succeeded"
+    else
+      status=$?
+      assert_eq "$status" "9" "existing output file is not overwritten"
+    fi
+
+    if "$SCRIPT_DIR/noc-inv" --non-interactive --shift-date "$NI_DAY" \
+        --name "../unsafe" --notebook-url "$NI_URL" \
+        --output-dir "$NI_OUT" </dev/null >"$LAB/noc-inv-unsafe-name.out" 2>&1; then
+      fail "unsafe non-interactive name unexpectedly succeeded"
+    else
+      status=$?
+      assert_eq "$status" "2" "unsafe non-interactive name is rejected"
+    fi
+
+    mkdir -p "$LAB/injection-output"
+    INJECTION_MARKER="$LAB/operator-input-executed"
+    INJECTION_TITLE="\$(touch '$INJECTION_MARKER')"
+    if "$SCRIPT_DIR/noc-inv" --non-interactive --shift-date "$NI_DAY" \
+        --name "$NI_NAME" --display-title "$INJECTION_TITLE" \
+        --notebook-url "$NI_URL" --output-dir "$LAB/injection-output" \
+        </dev/null >"$LAB/noc-inv-injection.out" 2>&1; then
+      pass "operator title did not execute as a command"
+    else
+      status=$?
+      if [[ "$status" -eq 8 && ! -e "$INJECTION_MARKER" ]]; then
+        pass "operator title did not execute as a command"
+      else
+        fail "operator title injection handling failed"
+      fi
+    fi
+
+    if "$SCRIPT_DIR/noc-inv" --non-interactive --shift-date "$NI_DAY" \
+        --name "$NI_NAME" --notebook-url "https://example.invalid/notebook/1" \
+        --output-dir "$LAB/non-interactive-url-output" </dev/null \
+        >"$LAB/noc-inv-invalid-url.out" 2>&1; then
+      fail "non-Datadog Notebook URL unexpectedly succeeded"
+    else
+      status=$?
+      assert_eq "$status" "3" "invalid Notebook URL receives its stable status"
+    fi
+
+    if "$SCRIPT_DIR/noc-inv" --non-interactive --shift-date "$NI_DAY" \
+        --name "$NI_NAME" --notebook-url "$NI_URL" \
+        --output-dir "$NI_OUT/../outside" </dev/null \
+        >"$LAB/noc-inv-unsafe-output.out" 2>&1; then
+      fail "traversal output directory unexpectedly succeeded"
+    else
+      status=$?
+      assert_eq "$status" "4" "traversal output directory is rejected"
+    fi
+
+    ln -s "$NI_OUT" "$LAB/output-symlink"
+    if "$SCRIPT_DIR/noc-inv" --non-interactive --shift-date "$NI_DAY" \
+        --name "$NI_NAME" --notebook-url "$NI_URL" \
+        --output-dir "$LAB/output-symlink" </dev/null \
+        >"$LAB/noc-inv-symlink-output.out" 2>&1; then
+      fail "symlink output directory unexpectedly succeeded"
+    else
+      status=$?
+      assert_eq "$status" "4" "symlink output directory is rejected"
+    fi
+
+    mkdir -p "$LAB/copilot-missing"
+    mv "$MOCK_BIN/copilot" "$MOCK_BIN/copilot.disabled"
+    if PATH="$MOCK_BIN:/usr/bin:/bin" "$SCRIPT_DIR/noc-inv" \
+        --non-interactive --shift-date "$NI_DAY" --name "$NI_NAME" \
+        --notebook-url "$NI_URL" --output-dir "$LAB/copilot-missing" \
+        </dev/null >"$LAB/noc-inv-copilot-missing.out" 2>&1; then
+      fail "missing Copilot CLI unexpectedly succeeded"
+    else
+      status=$?
+      assert_eq "$status" "5" "missing Copilot CLI receives its stable status"
+    fi
+    mv "$MOCK_BIN/copilot.disabled" "$MOCK_BIN/copilot"
+
+    mkdir -p "$LAB/mcp-failure-output"
+    touch "$MOCK_STATE/copilot-fail"
+    if "$SCRIPT_DIR/noc-inv" --non-interactive --shift-date "$NI_DAY" \
+        --name "$NI_NAME" --notebook-url "$NI_URL" \
+        --output-dir "$LAB/mcp-failure-output" </dev/null \
+        >"$LAB/noc-inv-mcp-failure.out" 2>&1; then
+      fail "Datadog MCP failure unexpectedly succeeded"
+    else
+      status=$?
+      assert_eq "$status" "6" "Datadog MCP failure receives its stable status"
+    fi
+    rm -f "$MOCK_STATE/copilot-fail"
+    if [[ -z "$(find "$LAB/mcp-failure-output" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+      pass "temporary generation files were cleaned after retrieval failure"
+    else
+      fail "retrieval failure left temporary files"
+    fi
+
+    mkdir -p "$LAB/copilot-timeout-output"
+    touch "$MOCK_STATE/copilot-timeout"
+    if NOC_INV_TIMEOUT_SECONDS=1 "$SCRIPT_DIR/noc-inv" \
+        --non-interactive --shift-date "$NI_DAY" --name "$NI_NAME" \
+        --notebook-url "$NI_URL" --output-dir "$LAB/copilot-timeout-output" \
+        </dev/null >"$LAB/noc-inv-timeout.out" 2>&1; then
+      fail "timed-out generation unexpectedly succeeded"
+    else
+      status=$?
+      assert_eq "$status" "7" "generation timeout receives its stable status"
+    fi
+    rm -f "$MOCK_STATE/copilot-timeout"
+    if [[ -z "$(find "$LAB/copilot-timeout-output" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+      pass "temporary generation files were cleaned after timeout"
+    else
+      fail "timeout left temporary files"
+    fi
+
+    mkdir -p "$LAB/malformed-output"
+    printf '# incomplete output\n' > "$MOCK_STATE/copilot-output"
+    if "$SCRIPT_DIR/noc-inv" --non-interactive --shift-date "$NI_DAY" \
+        --name "$NI_NAME" --notebook-url "$NI_URL" \
+        --output-dir "$LAB/malformed-output" </dev/null \
+        >"$LAB/noc-inv-malformed-output.out" 2>&1; then
+      fail "malformed output unexpectedly passed validation"
+    else
+      status=$?
+      assert_eq "$status" "8" "malformed output receives its stable status"
+    fi
+    if [[ -s "$LAB/malformed-output/investigation.md" ]]; then
+      pass "malformed output remains available for controlled review"
+    else
+      fail "malformed output was not retained"
+    fi
+    if [[ -z "$(find "$LAB/malformed-output" -mindepth 1 -maxdepth 1 -type d -print -quit)" ]]; then
+      pass "temporary generated files were cleaned after malformed output"
+    else
+      fail "malformed output left temporary files"
+    fi
+  fi
+
+  printf '\nResult\n'
 printf '  Passed:  %d\n' "$PASS"
 printf '  Failed:  %d\n' "$FAIL"
 printf '  Skipped: %d\n' "$SKIP"

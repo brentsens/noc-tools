@@ -5,6 +5,15 @@ set -euo pipefail
 
 INSTALL_DIR="$HOME/.local/bin"
 BACKUP_ROOT="$HOME/.local/share/noc-tools/backups"
+ALLOW_DIRTY=false
+
+if [[ $# -gt 0 ]]; then
+  [[ $# -eq 1 && "$1" == "--allow-dirty" ]] || {
+    echo "Usage: noc-install [--allow-dirty]" >&2
+    exit 2
+  }
+  ALLOW_DIRTY=true
+fi
 
 mapfile -t TOOLS < <(
   while IFS= read -r -d '' file; do
@@ -36,19 +45,26 @@ echo
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || fail "Run this from the noc-tools Git repository"
 
-# Refuse deployment from an uncommitted working tree.
-if ! git diff-index --quiet HEAD --; then
-  fail "Git working tree has uncommitted tracked changes"
+DIRTY=false
+if ! git diff-index --quiet HEAD -- \
+    || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  DIRTY=true
 fi
 
-if [ -n "$(git ls-files --others --exclude-standard)" ]; then
-  fail "Git working tree contains untracked files"
+if $DIRTY && ! $ALLOW_DIRTY; then
+  fail "Git working tree has changes; use --allow-dirty only for an explicitly authorized deployment"
 fi
 
-ok "Git working tree is clean"
+if $DIRTY; then
+  echo "  [WARN] Explicitly deploying the uncommitted working tree"
+else
+  ok "Git working tree is clean"
+fi
 
 COMMIT=$(git rev-parse --short HEAD)
 BRANCH=$(git branch --show-current)
+SOURCE_STATE="clean"
+$DIRTY && SOURCE_STATE="uncommitted"
 
 echo "  Branch: $BRANCH"
 echo "  Commit: $COMMIT"
@@ -103,7 +119,7 @@ echo
 echo "[3] Creating backup"
 
 STAMP=$(date '+%Y%m%d-%H%M%S')
-BACKUP_DIR="$BACKUP_ROOT/$STAMP-$COMMIT"
+BACKUP_DIR="$BACKUP_ROOT/$STAMP-$COMMIT-$SOURCE_STATE"
 
 mkdir -p "$BACKUP_DIR"
 
@@ -155,6 +171,7 @@ echo "NOC tools deployed successfully."
 echo
 echo "Branch: $BRANCH"
 echo "Commit: $COMMIT"
+echo "Source: $SOURCE_STATE"
 echo "Backup: $BACKUP_DIR"
 echo "Install: $INSTALL_DIR"
 echo "============================================================"
