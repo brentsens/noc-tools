@@ -30,10 +30,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-  echo "ERROR: tag must match vMAJOR.MINOR.PATCH." >&2
-  exit 2
-}
 [[ -f "$ARCHIVE" && -f "$CHECKSUM" ]] || {
   echo "ERROR: archive and checksum files are required." >&2
   exit 2
@@ -49,10 +45,13 @@ for command in jq sha256sum tar; do
   }
 done
 
-VERSION="${TAG#v}"
-ARCHIVE_NAME="noc-tools-v${VERSION}.tar.gz"
-CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
-ROOT_NAME="noc-tools-v${VERSION}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/release-artifact-names.sh"
+release_artifact_names "$TAG"
+VERSION="$RELEASE_VERSION"
+ARCHIVE_NAME="$RELEASE_ARCHIVE_NAME"
+CHECKSUM_NAME="$RELEASE_CHECKSUM_NAME"
+ROOT_NAME="$RELEASE_ROOT_NAME"
 [[ "$(basename "$ARCHIVE")" == "$ARCHIVE_NAME" ]] || {
   echo "ERROR: archive filename does not match tag." >&2
   exit 1

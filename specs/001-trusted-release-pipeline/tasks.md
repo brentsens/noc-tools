@@ -131,8 +131,11 @@ for noc-web Feature 012.
 
 - [X] T021 [P] Update specs/001-trusted-release-pipeline/quickstart.md with the final implemented command names and expected outputs, retaining the exact fully qualified signer workflow identity.
 - [X] T022 Run scripts/release/package-release.sh and all tests/release/*-test.sh plus ./noc-test from a clean workspace; resolve any failure before tagging.
-- [ ] T023 Create and push an annotated final semantic-version tag through .github/workflows/noc-release.yml after the release gate is green, then confirm the GitHub Release at that tag contains exactly the versioned archive and matching checksum.
+- [ ] T023 Create and push a new annotated final semantic-version tag through .github/workflows/noc-release.yml after the release gate is green; do not move, publish, or otherwise alter the failed v1.0.0 tag, and confirm the GitHub Release at the new immutable tag contains exactly the versioned archive and matching checksum.
 - [ ] T024 Independently execute scripts/release/verify-release.sh and the clean-install command checks in a fresh environment; record the tag, full commit SHA, archive SHA-256, provenance-verification result, manifest version, and noc-inv contract version in the GitHub Release notes for noc-web Feature 012 approval.
+- [X] T025 [P] Add regression coverage in tests/release/release-workflow-test.sh that requires the workflow archive and checksum outputs to be exactly noc-tools-v${VERSION}.tar.gz and noc-tools-v${VERSION}.tar.gz.sha256, rejects a removed v prefix, and rejects malformed archive or checksum extensions including .tar.g.sha256.
+- [X] T026 Define or reuse one canonical artifact-naming contract shared by scripts/release/package-release.sh, .github/workflows/noc-release.yml, scripts/release/verify-release.sh, and scripts/release/install-release.sh so archive, checksum, attestation subject, GitHub Release publication, installer, and verifier cannot silently diverge from noc-tools-vVERSION.tar.gz and noc-tools-vVERSION.tar.gz.sha256.
+- [X] T027 Run tests/release/package-release-test.sh, tests/release/release-workflow-test.sh, tests/release/verify-release-test.sh, tests/release/clean-install-test.sh, and ./noc-test; confirm provenance fails closed when its subject is absent or misnamed and that no publication action can modify or publish v1.0.0.
 
 ---
 
@@ -147,6 +150,7 @@ for noc-web Feature 012.
 - **User Story 3 (Phase 5)**: Depends on the archive installer and verifier from
   T012–T014 because the manifest is verified before installation.
 - **Polish (Phase 6)**: Depends on every selected user-story task.
+- **Artifact-name remediation (T025–T027)**: Depends on T007–T014; blocks T023 because a new release must use the canonical archive, checksum, attestation, publication, installer, and verifier names.
 
 ### User Story Dependencies
 
@@ -164,6 +168,8 @@ for noc-web Feature 012.
 - T015 and T016 can run in parallel after the installer/verifier behavior is
   defined.
 - T021 may run in parallel with final clean-workspace validation.
+- T025 can proceed in parallel with any documentation-only finalization; T026
+  follows its regression coverage, and T027 validates the integrated repair.
 
 ## Parallel Examples
 
@@ -202,8 +208,10 @@ Task: "Extend clean installation contract tests in tests/release/clean-install-t
 1. Add the verification and checkout-free installer path (T010–T014).
 2. Add the Feature 012 compatibility manifest and noc-inv contract enforcement
    (T015–T020).
-3. Complete the real tagged-release and independent-verification gate
-   (T021–T024) before approving noc-web consumption.
+3. Complete the artifact-name remediation and new tagged-release,
+   independent-verification gate (T021–T027) before approving noc-web
+   consumption. Preserve v1.0.0 as immutable and unpublished; use a new
+   immutable version for the next release attempt.
 
 ### Format Validation
 

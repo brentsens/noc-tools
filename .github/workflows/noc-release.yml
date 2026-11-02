@@ -22,6 +22,10 @@ jobs:
             echo "ERROR: Release tags must match vMAJOR.MINOR.PATCH." >&2
             exit 1
           }
+          [[ "$TAG" != "v1.0.0" ]] || {
+            echo "ERROR: v1.0.0 is retired and must remain unpublished." >&2
+            exit 1
+          }
 
   validate:
     name: Run noc-tools validation
@@ -55,8 +59,10 @@ jobs:
             --tag "$TAG" \
             --commit "$COMMIT" \
             --output-dir dist
-          echo "archive=dist/noc-tools-${VERSION}.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "checksum=dist/noc-tools-${VERSION}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          source scripts/release/release-artifact-names.sh
+          release_artifact_names "$TAG"
+          echo "archive=dist/${RELEASE_ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/${RELEASE_CHECKSUM_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Generate SLSA provenance
         uses: actions/attest@v4

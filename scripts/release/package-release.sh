@@ -25,10 +25,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-  echo "ERROR: tag must match vMAJOR.MINOR.PATCH." >&2
-  exit 2
-}
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
   echo "ERROR: commit must be a full lowercase SHA-1." >&2
   exit 2
@@ -47,10 +43,12 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-VERSION="${TAG#v}"
-ARCHIVE_NAME="noc-tools-v${VERSION}.tar.gz"
-CHECKSUM_NAME="${ARCHIVE_NAME}.sha256"
-ROOT_NAME="noc-tools-v${VERSION}"
+source "$SCRIPT_DIR/release-artifact-names.sh"
+release_artifact_names "$TAG"
+VERSION="$RELEASE_VERSION"
+ARCHIVE_NAME="$RELEASE_ARCHIVE_NAME"
+CHECKSUM_NAME="$RELEASE_CHECKSUM_NAME"
+ROOT_NAME="$RELEASE_ROOT_NAME"
 
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
