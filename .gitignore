@@ -12,6 +12,9 @@ secrets*
 *.bak
 *.backup
 *~
+*.swp
+Thumbs.db
+dist/
 
 # Editor / OS files
 .vscode/

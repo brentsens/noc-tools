@@ -25,6 +25,42 @@ The individual scripts remain available for troubleshooting, development, recove
 
 ---
 
+# Trusted Release Installation
+
+Fresh workstations install noc-tools from a verified GitHub Release rather than
+from a `~/code/noc-tools` checkout. Final releases use tags in the exact form
+`vMAJOR.MINOR.PATCH` and publish these assets:
+
+```text
+noc-tools-vMAJOR.MINOR.PATCH.tar.gz
+noc-tools-vMAJOR.MINOR.PATCH.tar.gz.sha256
+```
+
+Before extracting or installing, verify the checksum and provenance:
+
+```bash
+gh attestation verify noc-tools-vMAJOR.MINOR.PATCH.tar.gz \
+  --repo brentsens/noc-tools \
+  --signer-workflow brentsens/noc-tools/.github/workflows/noc-release.yml \
+  --source-ref refs/tags/vMAJOR.MINOR.PATCH
+```
+
+After verification, extract the archive and run its `install-release.sh`. It
+installs `tix`, `noc-start`, `noc-status`, `noc-inv`, and `noc-handover` into
+`~/.local/bin` without requiring or creating a developer checkout.
+
+The release manifest requires `noc-inv` contract version 1. Confirm it after
+installation:
+
+```bash
+noc-inv --contract-version
+```
+
+noc-web Feature 012 must not consume noc-tools until a real release has passed
+this verification process independently in a clean environment.
+
+---
+
 # Design Principles
 
 The toolkit follows several operational rules.

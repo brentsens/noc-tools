@@ -1,0 +1,79 @@
+name: NOC Tools Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require final semantic version
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "ERROR: Release tags must match vMAJOR.MINOR.PATCH." >&2
+            exit 1
+          }
+
+  validate:
+    name: Run noc-tools validation
+    needs: validate-tag
+    uses: ./.github/workflows/noc-ci.yaml
+
+  publish:
+    name: Package, attest, and publish
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Package release archive
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          COMMIT="$(git rev-parse HEAD)"
+          scripts/release/package-release.sh \
+            --tag "$TAG" \
+            --commit "$COMMIT" \
+            --output-dir dist
+          echo "archive=dist/noc-tools-${VERSION}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/noc-tools-${VERSION}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SLSA provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" "$ARCHIVE" "$CHECKSUM" \
+            --repo brentsens/noc-tools \
+            --verify-tag \
+            --title "noc-tools ${TAG#v}" \
+            --generate-notes

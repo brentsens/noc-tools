@@ -1,6 +1,8 @@
 name: NOC Tools CI
 
 on:
+  workflow_call:
+
   push:
     branches:
       - main
